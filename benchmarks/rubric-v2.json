@@ -1,0 +1,87 @@
+{
+  "name": "translation_rubric",
+  "version": "2",
+  "categories": [
+    {
+      "name": "answer_fidelity",
+      "label": "Answer",
+      "description": "Does the English answer denote the same answer as the source, with the same accepted-answer boundaries? Judge ONLY the answer field and its criteria; ignore prose quality, clue handling, difficulty, and the status decision. Anchors: 4 = same answer, same accepted boundaries; 3 = same answer, boundaries slightly loosened or tightened; 2 = same referent but a materially different accepted set; 1 = related but distinguishable answer; 0 = a different answer.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 2
+    },
+    {
+      "name": "clue_fidelity",
+      "label": "Clues",
+      "description": "Take an inventory of the source's essential clues and compare it with the English question and handout. Every essential clue must survive, and no clue may be imported from the explanation or invented. Judge ONLY this inventory; do NOT judge whether the puzzle is solvable overall (solvability) or how hard it became (difficulty_match). Anchors: 4 = every essential clue present, nothing added; 3 = a peripheral clue reworded with no information change; 2 = one essential clue weakened, or one non-essential clue added; 1 = an essential clue removed or a solution-bearing clue added; 0 = the clue set no longer corresponds to the source.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 2
+    },
+    {
+      "name": "solvability",
+      "label": "Solvable",
+      "description": "Using ONLY the English question and handout text, could a competent English-speaking team reach the answer by fair reasoning? Every referent (\"this\", \"these\", \"which one\") must point to supplied text or a fully described object, and any required artifact must actually be present. Judge the text as delivered; do NOT re-judge the writer's status label here. Anchors: 4 = fair, self-contained route; 3 = solvable, with one demanding but fair inference; 2 = route exists but leans on an under-described referent; 1 = requires an artifact or knowledge the text never supplies; 0 = no route exists.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 2
+    },
+    {
+      "name": "difficulty_match",
+      "label": "Difficulty",
+      "description": "How closely does the English version's difficulty match the source's? Score the SIZE of the shift in either direction, ignoring whether the result is otherwise good. Judge ONLY difficulty; a question can preserve every clue and still give the answer away through phrasing. Anchors: 4 = indistinguishable difficulty; 3 = a slight shift a strong team would not notice; 2 = noticeably easier or harder; 1 = the answer is nearly disclosed, or an unaided leap is required; 0 = trivial or impossible.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 1
+    },
+    {
+      "name": "english_quality",
+      "label": "English",
+      "description": "Read the player-facing English as a monolingual quiz editor would. Is it idiomatic, economical, and natural read aloud, free of calques, Russian syntax, and transcript chatter? Treat the puzzle content as fixed and judge ONLY the prose; do not deduct for clue or difficulty problems scored elsewhere. Anchors: 4 = reads as originally written in English; 3 = one slightly stiff phrase; 2 = several translationese markers; 1 = obviously translated throughout; 0 = ungrammatical or incoherent.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 1.5
+    },
+    {
+      "name": "explanation_fidelity",
+      "label": "Explain",
+      "description": "Does the English explanation convey the source's reasoning accurately, without inventing facts or retaining presenter chatter and transcript corrections? Judge ONLY the explanation field; ignore the player-facing question entirely. Anchors: 4 = accurate, clean, complete reasoning; 3 = accurate with minor redundancy; 2 = a reasoning step lost or muddled; 1 = a claim not supported by the source; 0 = wrong or missing reasoning.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 1
+    },
+    {
+      "name": "editor_safety",
+      "label": "Editor",
+      "description": "Diagnostic for the final copy-edit stage: did editing improve prose without semantic drift, clue changes, or answer changes? Score 4 when no edit was made or the edit was purely cosmetic. Judge ONLY the delta introduced by the editor. Anchors: 4 = no drift; 3 = wording changed, meaning intact; 2 = a nuance or hedge lost; 1 = a fact or clue altered; 0 = the answer or mechanism changed.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 0.5
+    },
+    {
+      "name": "feasibility_decision",
+      "label": "Feasibility",
+      "description": "Is the chosen status label (translated / adapted / untranslatable) the right call for this source? Judge ONLY the label's defensibility: 'adapted' requires a permitted local repair, and 'untranslatable' requires that no fair English version exists. Score this even when the English text is strong, and do not let prose quality influence it. Anchors: 4 = clearly the right label; 3 = defensible, a neighbouring label was also reasonable; 2 = the wrong label but harmless; 1 = a language-bound or artifact-dependent puzzle waved through as translatable; 0 = a solvable puzzle abandoned as untranslatable, or the reverse.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 1.5
+    },
+    {
+      "name": "untranslatable_reason_quality",
+      "label": "Reason",
+      "description": "Score this ONLY when the terminal status is untranslatable; omit it otherwise. Is the stated reason concrete, specific to this puzzle, and does it identify the actual blocking mechanism (a Russian-only wordplay, a missing artifact, a corrupted source)? Judge ONLY the reason's quality, not whether the untranslatable call itself was right. Anchors: 4 = names the exact blocking mechanism; 3 = correct but generic; 2 = vague gesture at difficulty; 1 = restates that translation is hard; 0 = absent or wrong.",
+      "minimum": 0,
+      "maximum": 4,
+      "weight": 1.5
+    }
+  ],
+  "hard_failures": [
+    "answer_changed",
+    "new_clue_added",
+    "essential_clue_removed",
+    "missing_artifact_accepted",
+    "language_bound_mechanism_accepted",
+    "replacement_puzzle",
+    "editor_semantic_drift"
+  ]
+}
