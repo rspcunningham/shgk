@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -381,21 +379,21 @@ class AgentsTranslationClient:
         self.translator = Agent(
             name="ChGK English translator",
             instructions=_TRANSLATOR_INSTRUCTIONS,
-            model=translator_model,
+            model=TRANSLATOR_MODEL,
             model_settings=settings_for("translator"),
             output_type=TranslationCandidate,
         )
         self.critic = Agent(
             name="ChGK translation critic",
             instructions=_CRITIC_INSTRUCTIONS,
-            model=critic_model,
+            model=CRITIC_MODEL,
             model_settings=settings_for("critic"),
             output_type=TranslationCritique,
         )
         self.editor = Agent(
             name="ChGK English copy editor",
             instructions=_EDITOR_INSTRUCTIONS,
-            model=editor_model,
+            model=EDITOR_MODEL,
             model_settings=settings_for("editor"),
             output_type=EnglishEdit,
         )
@@ -541,37 +539,6 @@ class WorkflowResult:
     editor_usage: UsageTotals
     editor_status: Literal["unchanged", "edited", "needs_rework", "skipped"]
 
-
-def workflow_result_dict(
-    source: TranslationInput,
-    result: WorkflowResult,
-) -> dict[str, object]:
-    return {
-        "source": {
-            **source.prompt_dict(),
-            "source": source.source,
-            "source_question_id": source.source_question_id,
-            "source_content_hash": source.source_content_hash,
-        },
-        "output": result.candidate.model_dump(),
-        "workflow": {
-            "translation_attempts": result.translation_attempts,
-            "critic_attempts": result.critic_attempts,
-            "editor_attempts": result.editor_attempts,
-            "editor_status": result.editor_status,
-            "usage": asdict(result.usage),
-            "pre_editor_candidate": (
-                result.pre_editor_candidate.model_dump()
-                if result.pre_editor_candidate
-                else None
-            ),
-            "editor_result": (
-                result.editor_result.model_dump() if result.editor_result else None
-            ),
-            "editor_usage": asdict(result.editor_usage),
-            "history": result.history,
-        },
-    }
 
 
 def _local_issues(candidate: TranslationCandidate) -> list[str]:
@@ -940,7 +907,9 @@ class TranslationPipeline:
         progress: Callable[[str], None] | None = None,
     ) -> dict[str, int]:
         inputs = self._pending_inputs(limit=limit, offset=offset, refresh=refresh)
-        counts = {"selected": len(inputs), "completed": 0, "errors": 0}
+        counts: dict[str, object] = {
+            "selected": len(inputs), "completed": 0, "errors": 0, "question_ids": [],
+        }
         semaphore = asyncio.Semaphore(max(1, workers))
         finished = 0
 
@@ -963,6 +932,7 @@ class TranslationPipeline:
                         raise
                     return
                 self._save(source, result)
+                counts["question_ids"].append(source.question_id)
                 counts["completed"] += 1
                 finished += 1
                 if progress:

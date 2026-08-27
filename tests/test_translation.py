@@ -6,7 +6,12 @@ import sqlite3
 from shgk import db
 from shgk.curation import content_hash, normalized_hash
 from shgk.translation import (
+    CRITIC_MODEL,
+    EDITOR_MODEL,
+    REASONING_EFFORT,
+    TRANSLATOR_MODEL,
     AgentCall,
+    AgentsTranslationClient,
     EnglishEdit,
     TranslationCandidate,
     TranslationCritique,
@@ -271,7 +276,8 @@ def test_pipeline_translates_pending_rows_and_resumes(tmp_path) -> None:
     pipeline = TranslationPipeline(path)
 
     first = asyncio.run(pipeline.run(client, limit=2))
-    assert first == {"selected": 2, "completed": 2, "errors": 0}
+    assert first["selected"] == 2 and first["completed"] == 2
+    assert first["question_ids"] == [1, 2]
     assert _translated_ids(path) == [1, 2]
 
     # A rerun must not redo work that is already current.
@@ -280,7 +286,7 @@ def test_pipeline_translates_pending_rows_and_resumes(tmp_path) -> None:
     assert _translated_ids(path) == [1, 2, 3]
 
     third = asyncio.run(pipeline.run(client, limit=2))
-    assert third == {"selected": 0, "completed": 0, "errors": 0}
+    assert third["selected"] == 0 and third["completed"] == 0
 
 
 def test_changed_question_text_makes_a_translation_stale(tmp_path) -> None:
@@ -345,5 +351,17 @@ def test_workers_translate_concurrently_and_save_every_row(tmp_path) -> None:
     path = _seed(tmp_path, 6)
     client = FakeClient([_candidate()] * 6, [_critique()] * 6)
     result = asyncio.run(TranslationPipeline(path).run(client, limit=6, workers=4))
-    assert result == {"selected": 6, "completed": 6, "errors": 0}
+    assert result["selected"] == 6 and result["completed"] == 6 and result["errors"] == 0
     assert _translated_ids(path) == [1, 2, 3, 4, 5, 6]
+
+
+def test_client_constructs_its_three_agents() -> None:
+    """The unit tests all use a fake client, so nothing else builds the real one."""
+    client = AgentsTranslationClient()
+    assert client.translator.model == TRANSLATOR_MODEL
+    assert client.critic.model == CRITIC_MODEL
+    assert client.editor.model == EDITOR_MODEL
+    assert client.reasoning_effort == REASONING_EFFORT
+    for agent in (client.translator, client.critic, client.editor):
+        assert agent.model_settings.max_tokens > 0
+        assert agent.output_type is not None

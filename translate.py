@@ -25,6 +25,8 @@ from shgk.translation import (  # noqa: E402
     install_pooled_openai_client,
 )
 
+# Rough planning figure only. Actual spend is dominated by reasoning tokens,
+# which vary several-fold between questions; the run reports real usage.
 COST_PER_QUESTION = 0.03
 
 
@@ -47,7 +49,7 @@ def main() -> int:
         install_pooled_openai_client()
 
     print(f"translating up to {args.count:,} questions "
-          f"(~${args.count * COST_PER_QUESTION:,.0f})")
+          f"(rough estimate ${args.count * COST_PER_QUESTION:,.2f})")
     result = asyncio.run(
         TranslationPipeline(db.DEFAULT_PATH).run(
             AgentsTranslationClient(),
@@ -63,7 +65,33 @@ def main() -> int:
         f"selected={result['selected']} completed={result['completed']} "
         f"errors={result['errors']}"
     )
+    if result["completed"]:
+        _report_usage(result["question_ids"])
     return 1 if result["errors"] else 0
+
+
+def _report_usage(question_ids: list[int]) -> None:
+    """Report what the run actually consumed, since estimates are unreliable here."""
+    if not question_ids:
+        return
+    placeholders = ",".join("?" * len(question_ids))
+    with db.connect(db.DEFAULT_PATH, read_only=True) as connection:
+        row = connection.execute(
+            f"""
+            SELECT SUM(input_tokens) i, SUM(cached_input_tokens) c,
+                   SUM(output_tokens) o, SUM(reasoning_output_tokens) r,
+                   SUM(api_requests) q, COUNT(*) n
+            FROM translations WHERE question_id IN ({placeholders})
+            """,
+            question_ids,
+        ).fetchone()
+    n = row["n"] or 1
+    print(
+        f"usage: {row['q']:,} requests, "
+        f"input {row['i']:,} ({row['c']:,} cached), "
+        f"output {row['o']:,} ({row['r']:,} reasoning)"
+    )
+    print(f"       per question: input {row['i'] / n:,.0f}, output {row['o'] / n:,.0f}")
 
 
 if __name__ == "__main__":
