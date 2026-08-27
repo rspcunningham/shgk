@@ -121,7 +121,6 @@ def test_run_benchmark_overlaps_cases(tmp_path, monkeypatch) -> None:
         await asyncio.sleep(0.05)
         in_flight -= 1
         candidate = TranslationCandidate(
-            source_language="ru",
             status="translated",
             question_en="Question",
             answer_en="Answer",
@@ -203,7 +202,6 @@ def test_run_benchmark_does_not_abort_siblings_on_transient(tmp_path, monkeypatc
                 "overloaded', 'code': 502}"
             )
         candidate = TranslationCandidate(
-            source_language="ru",
             status="translated",
             question_en="Question",
             answer_en="Answer",
@@ -275,7 +273,6 @@ def test_run_benchmark_is_idempotent_across_invocations(tmp_path, monkeypatch) -
         nonlocal calls
         calls += 1
         candidate = TranslationCandidate(
-            source_language="ru",
             status="translated",
             question_en="Question",
             answer_en="Answer",

@@ -124,9 +124,6 @@ CREATE INDEX IF NOT EXISTS translations_status_idx
 
 
 class TranslationCandidate(BaseModel):
-    source_language: str = Field(
-        description="ISO 639-1 code of the source question's language: ru, uk, be, ..."
-    )
     status: Literal["translated", "adapted", "untranslatable"]
     question_en: str = Field(description="English question, or empty if untranslatable")
     answer_en: str = Field(description="English answer, or empty if untranslatable")
@@ -243,11 +240,6 @@ You are the writer responsible for adapting Russian What? Where? When? quiz
 questions into playable English. Return only the requested structured result.
 
 {TRANSLATION_CONSTITUTION}
-
-First report the source language in source_language as an ISO 639-1 code. The
-corpus is overwhelmingly Russian, but a small number of questions are Ukrainian
-or Belarusian; translate those on the same terms, and judge language-dependent
-mechanisms against whichever language the source is actually written in.
 
 Translate the question, answer, explanation, accepted-answer criteria, and any
 textual handout together. The explanation is reference material, not a source of
@@ -915,7 +907,6 @@ async def run_translation_workflow(
                 )
             reason = critique.summary.strip() or critique.revision_instructions.strip()
             exhausted = TranslationCandidate(
-                source_language=candidate.source_language,
                 status="untranslatable",
                 question_en="",
                 answer_en="",

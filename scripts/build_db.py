@@ -164,9 +164,6 @@ def load_translations(target: sqlite3.Connection) -> None:
             (
                 question_id,
                 current[question_id],
-                # Legacy rows predate language reporting; the next translation
-                # run fills it in.
-                "",
                 row["status"],
                 row["question_en"],
                 row["answer_en"],
@@ -189,7 +186,7 @@ def load_translations(target: sqlite3.Connection) -> None:
             )
         )
     target.executemany(
-        "INSERT OR REPLACE INTO translations VALUES (" + ",".join("?" * 22) + ")",
+        "INSERT OR REPLACE INTO translations VALUES (" + ",".join("?" * 21) + ")",
         carried,
     )
     legacy.close()

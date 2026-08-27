@@ -72,7 +72,6 @@ CREATE TABLE IF NOT EXISTS question_duplicates (
 CREATE TABLE IF NOT EXISTS translations (
     question_id            INTEGER PRIMARY KEY REFERENCES questions(id),
     content_hash           TEXT    NOT NULL,
-    source_language        TEXT    NOT NULL DEFAULT '',
     status                 TEXT    NOT NULL
                            CHECK (status IN ('translated','adapted','untranslatable')),
     question_en            TEXT    NOT NULL DEFAULT '',

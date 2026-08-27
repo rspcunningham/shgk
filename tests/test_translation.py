@@ -33,10 +33,9 @@ def _record(identifier: str, *, explanation: str = "Объяснение") -> Qu
 
 
 def _candidate(
-    *, status: str = "translated", question: str = "Question", language: str = "ru"
+    *, status: str = "translated", question: str = "Question"
 ) -> TranslationCandidate:
     return TranslationCandidate(
-        source_language=language,
         status=status,
         question_en=question,
         answer_en="Answer",
@@ -188,22 +187,6 @@ def test_workflow_becomes_untranslatable_when_revision_limit_is_exhausted() -> N
     assert "revision limit" in result.candidate.changes_description
     assert len(result.history) == 2
     assert result.editor_status == "skipped"
-
-
-def test_exhausted_workflow_keeps_the_observed_source_language() -> None:
-    """The synthesised untranslatable result must not lose the detected language."""
-    client = FakeClient(
-        [_candidate(language="uk"), _candidate(language="uk")],
-        [
-            _critique(decision="revise", status="untranslatable"),
-            _critique(decision="revise", status="untranslatable"),
-        ],
-    )
-
-    result = asyncio.run(run_translation_workflow(client, _input(), max_revisions=1))
-
-    assert result.candidate.status == "untranslatable"
-    assert result.candidate.source_language == "uk"
 
 
 def test_workflow_keeps_playable_candidate_when_only_polish_hits_limit() -> None:
