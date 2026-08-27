@@ -1,25 +1,88 @@
+"""Parse GotQuestions package pages into corpus rows.
+
+The site is a Next.js app that ships the whole package as JSON inside its RSC
+stream, so parsing means recovering that object rather than scraping markup.
+"""
+
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from ..models import QuestionRecord, clean_text
-
+from ..curation import content_hash, detect_kind, normalized_hash, split_host_note
 
 BASE_URL = "https://gotquestions.online"
+PACK_URL = BASE_URL + "/pack/{}"
+
 _PACK_LINK_RE = re.compile(r"^/pack/(\d+)(?:[/?#]|$)")
-_NEXT_CHUNK_RE = re.compile(
-    r"self\.__next_f\.push\(\[1,(\"(?:\\.|[^\"\\])*\")\]\)"
-)
+_NEXT_CHUNK_RE = re.compile(r"self\.__next_f\.push\(\[1,(\"(?:\\.|[^\"\\])*\")\]\)")
+_BLANK_LINES = re.compile(r"\n{3,}")
+
+MEDIA_FIELDS = {
+    "razdatkaPic": "handout",
+    "audio": "question_audio",
+    "answerPic": "answer",
+    "commentPic": "explanation",
+    "commentAudio": "explanation_audio",
+}
 
 
 class GotQuestionsParseError(ValueError):
     pass
+
+
+def clean_text(value: Any) -> str:
+    """Normalize source text without flattening meaningful line breaks."""
+    if value is None:
+        return ""
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    return _BLANK_LINES.sub("\n\n", "\n".join(lines)).strip()
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedQuestion:
+    id: int
+    question_number: int | None
+    question: str
+    answer: str
+    explanation: str
+    acceptance_criteria: str
+    handout_text: str
+    host_note: str
+    kind: str
+    has_media: int
+    media_urls: str
+    author_ids: str
+    author_names: str
+    tournament_ids: str
+    source_references: str
+    taken_down: int
+    solve_percentages: str
+    correct_answers: str
+    content_hash: str
+    normalized_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedPack:
+    id: int
+    title: str
+    slug: str
+    played_at_start: str | None
+    played_at_end: str | None
+    editor_ids: str
+    editor_names: str
+    questions: list[ParsedQuestion]
 
 
 def discover_pack_ids(html: str) -> list[int]:
@@ -28,17 +91,14 @@ def discover_pack_ids(html: str) -> list[int]:
     seen: set[int] = set()
     for anchor in soup.find_all("a", href=True):
         match = _PACK_LINK_RE.match(anchor["href"])
-        if not match:
-            continue
-        pack_id = int(match.group(1))
-        if pack_id not in seen:
-            seen.add(pack_id)
-            result.append(pack_id)
+        if match and int(match.group(1)) not in seen:
+            seen.add(int(match.group(1)))
+            result.append(int(match.group(1)))
     return result
 
 
 def extract_pack_object(html: str) -> dict[str, Any]:
-    """Extract the complete package object from the Next.js RSC stream."""
+    """Recover the complete package object from the Next.js RSC stream."""
     soup = BeautifulSoup(html, "lxml")
     chunks: list[str] = []
     for script in soup.find_all("script"):
@@ -50,11 +110,10 @@ def extract_pack_object(html: str) -> dict[str, Any]:
                 raise GotQuestionsParseError("Invalid Next.js data chunk") from error
 
     stream = "".join(chunks)
-    marker = '"pack":'
-    marker_index = stream.find(marker)
+    marker_index = stream.find('"pack":')
     if marker_index < 0:
         raise GotQuestionsParseError("Could not find embedded package data")
-    object_start = stream.find("{", marker_index + len(marker))
+    object_start = stream.find("{", marker_index + len('"pack":'))
     if object_start < 0:
         raise GotQuestionsParseError("Embedded package value is not an object")
     try:
@@ -66,108 +125,87 @@ def extract_pack_object(html: str) -> dict[str, Any]:
     return pack
 
 
-def _people(items: Any) -> list[dict[str, Any]]:
+def _people(items: Any) -> tuple[str, str]:
     if not isinstance(items, list):
-        return []
-    return [
-        {"id": item.get("id"), "name": clean_text(item.get("name"))}
-        for item in items
-        if isinstance(item, dict)
-    ]
+        return "[]", "[]"
+    people = [item for item in items if isinstance(item, dict)]
+    return (
+        _json([person.get("id") for person in people]),
+        _json([clean_text(person.get("name")) for person in people]),
+    )
 
 
 def _media(question: dict[str, Any]) -> list[dict[str, str]]:
-    fields = {
-        "razdatkaPic": "handout",
-        "audio": "question_audio",
-        "answerPic": "answer",
-        "commentPic": "explanation",
-        "commentAudio": "explanation_audio",
-    }
-    result = []
-    for field, role in fields.items():
-        value = question.get(field)
-        if isinstance(value, str) and value.strip():
-            result.append({"role": role, "url": urljoin(BASE_URL, value.strip())})
-    return result
+    return [
+        {"role": role, "url": urljoin(BASE_URL, question[field].strip())}
+        for field, role in MEDIA_FIELDS.items()
+        if isinstance(question.get(field), str) and question[field].strip()
+    ]
 
 
-def parse_pack(html: str, *, fetched_at: str | None = None) -> list[QuestionRecord]:
+def _question(raw: dict[str, Any]) -> ParsedQuestion:
+    text = clean_text(raw.get("text"))
+    if not text:
+        text = "[Media question; see media URLs]"
+    question, host_note = split_host_note(text)
+    answer = clean_text(raw.get("answer"))
+    explanation = clean_text(raw.get("comment"))
+    criteria = clean_text(raw.get("zachet"))
+    handout = clean_text(raw.get("razdatkaText"))
+    author_ids, author_names = _people(raw.get("authors"))
+    media = _media(raw)
+    tournaments = raw.get("tournaments") or []
+    return ParsedQuestion(
+        id=int(raw["id"]),
+        question_number=raw.get("number"),
+        question=question,
+        answer=answer,
+        explanation=explanation,
+        acceptance_criteria=criteria,
+        handout_text=handout,
+        host_note=host_note,
+        # Detected on the original text: a pack can declare the multi-part
+        # marker inside a host note.
+        kind=detect_kind(text),
+        has_media=1 if media else 0,
+        media_urls=_json(media),
+        author_ids=author_ids,
+        author_names=author_names,
+        tournament_ids=_json(
+            [t.get("id") for t in tournaments if isinstance(t, dict)]
+        ),
+        source_references=(raw.get("source") or "").strip(),
+        taken_down=1 if raw.get("takenDown") else 0,
+        solve_percentages=_json(raw.get("complexity") or []),
+        correct_answers=_json(raw.get("correct_answers") or []),
+        content_hash=content_hash(question, answer, explanation, criteria, handout),
+        normalized_hash=normalized_hash(question),
+    )
+
+
+def parse_pack(html: str) -> ParsedPack:
     pack = extract_pack_object(html)
-    fetched_at = fetched_at or datetime.now(UTC).isoformat()
-    pack_id = str(pack["id"])
-    package_title = clean_text(pack.get("title"))
-    played_at = clean_text(pack.get("startDate"))
-    pack_editors = _people(pack.get("editors"))
-    db_slug = clean_text(pack.get("dbchgkinfoslug"))
-    records: list[QuestionRecord] = []
-
-    for tour in pack.get("tours") or []:
-        if not isinstance(tour, dict):
-            continue
-        for question in tour.get("questions") or []:
-            if not isinstance(question, dict) or question.get("id") is None:
-                continue
-            question_id = str(question["id"])
-            media = _media(question)
-            extra = {
-                "pack": {
-                    "id": pack.get("id"),
-                    "long_title": pack.get("longTitle"),
-                    "end_date": pack.get("endDate"),
-                    "publication_date": pack.get("pubDate"),
-                    "editors": pack_editors,
-                    "info": pack.get("info"),
-                    "discussion_url": pack.get("discussionURL"),
-                    "db_chgk_info_slug": db_slug or None,
-                },
-                "round": {
-                    "id": tour.get("id"),
-                    "number": tour.get("number"),
-                    "title": tour.get("title"),
-                    "info": tour.get("info"),
-                    "editors": _people(tour.get("editors")),
-                },
-                "question_number": question.get("number"),
-                "authors": _people(question.get("authors")),
-                "source_references": question.get("source"),
-                "rejected_answers": question.get("nezachet"),
-                "notes": question.get("note"),
-                "tags": question.get("tags") or [],
-                "rating": {
-                    "teams": question.get("teams") or [],
-                    "solve_percentages": question.get("complexity") or [],
-                    "correct_answers": question.get("correct_answers") or [],
-                    "tournaments": question.get("tournaments") or [],
-                },
-                "taken_down": bool(question.get("takenDown")),
-            }
-            record = QuestionRecord(
-                source="gotquestions",
-                source_question_id=question_id,
-                source_url=f"{BASE_URL}/question/{question_id}",
-                game_kind="sport_chgk",
-                question=question.get("text") or "",
-                answer=question.get("answer") or "",
-                explanation=question.get("comment") or "",
-                acceptance_criteria=question.get("zachet") or "",
-                handout_text=question.get("razdatkaText") or "",
-                media_urls_json=json.dumps(
-                    media, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                ),
-                package_title=package_title,
-                played_at=played_at,
-                extra_json=json.dumps(
-                    extra, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                ),
-                fetched_at=fetched_at,
-            )
-            records.append(record.finalize())
-
-    expected = pack.get("questions")
-    if isinstance(expected, int) and expected != len(records):
+    editor_ids, editor_names = _people(pack.get("editors"))
+    questions = [
+        _question(raw)
+        for tour in (pack.get("tours") or [])
+        if isinstance(tour, dict)
+        for raw in (tour.get("questions") or [])
+        if isinstance(raw, dict) and raw.get("id") is not None
+    ]
+    declared = pack.get("questions")
+    if isinstance(declared, int) and declared != len(questions):
         raise GotQuestionsParseError(
-            f"Package {pack_id} declared {expected} questions but parsed {len(records)}"
+            f"Package {pack['id']} declared {declared} questions "
+            f"but parsed {len(questions)}"
         )
-    return records
-
+    return ParsedPack(
+        id=int(pack["id"]),
+        title=clean_text(pack.get("title")) or clean_text(pack.get("longTitle")),
+        slug=clean_text(pack.get("dbchgkinfoslug")),
+        played_at_start=clean_text(pack.get("startDate")) or None,
+        played_at_end=clean_text(pack.get("endDate")) or None,
+        editor_ids=editor_ids,
+        editor_names=editor_names,
+        questions=questions,
+    )
