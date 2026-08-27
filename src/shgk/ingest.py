@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Callable
 
@@ -38,6 +38,12 @@ def _index_url(page: int) -> str:
 # A package is settled once it has been fetched and parsed. Failures are not,
 # so they are retried on the next run.
 SETTLED = ("ok", "empty")
+
+# Solve statistics land after a tournament is played, so a package fetched soon
+# after publication has questions with no difficulty data yet. Recently played
+# packages are therefore never treated as settled: without this the newest
+# questions would keep their empty statistics permanently.
+RESTLESS_DAYS = 180
 
 
 def discover(
@@ -162,13 +168,17 @@ def ingest(
     and every write stay on the calling thread, since the SQLite connection
     belongs to it.
     """
-    known = {
-        row["id"]: (row["status"], row["page_hash"])
-        for row in connection.execute("SELECT id, status, page_hash FROM packages")
-    }
-    settled = frozenset(
-        pack_id for pack_id, (status, _) in known.items() if status in SETTLED
-    )
+    cutoff = (datetime.now(UTC) - timedelta(days=RESTLESS_DAYS)).strftime("%Y-%m-%d")
+    known = {}
+    settled_ids = set()
+    for row in connection.execute(
+        "SELECT id, status, page_hash, played_at_start FROM packages"
+    ):
+        known[row["id"]] = (row["status"], row["page_hash"])
+        recent = (row["played_at_start"] or "") >= cutoff
+        if row["status"] in SETTLED and not recent:
+            settled_ids.add(row["id"])
+    settled = frozenset(settled_ids)
     if pack_ids is None:
         pack_ids = discover(
             client, settled=frozenset() if refresh else settled, pages=pages
