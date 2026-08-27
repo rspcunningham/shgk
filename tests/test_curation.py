@@ -7,7 +7,6 @@ import pytest
 from shgk.curation import (
     content_hash,
     detect_kind,
-    detect_lang,
     exclusion_reason,
     normalized_hash,
     rebuild_duplicates,
@@ -57,19 +56,6 @@ def test_question_without_a_host_note_is_untouched():
 )
 def test_detect_kind(question, expected):
     assert detect_kind(question) == expected
-
-
-@pytest.mark.parametrize(
-    "text, expected",
-    [
-        ("У своїй автобіографії розповідає про вчителя", "uk"),
-        ("У пастаноўцы непаразуменне паміж тутэйшымі ў горадзе", "be"),
-        ("Русский текст, в котором один раз мелькнуло і.", "ru"),
-        ("Назовите этот предмет одним словом.", "ru"),
-    ],
-)
-def test_detect_lang(text, expected):
-    assert detect_lang(text) == expected
 
 
 def test_content_hash_ignores_play_statistics():

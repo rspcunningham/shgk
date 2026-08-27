@@ -27,10 +27,6 @@ HOST_NOTE = re.compile(
 # note. Matching the bare word would also hit "столица", "лицо" and "полиция".
 MULTIPART = re.compile(r"(?:^|\n)\s*(?:\[[^\]]*\]\s*)*(Блиц|Дуплет|БЛИЦ|ДУПЛЕТ)\b")
 
-# Ukrainian and Belarusian questions appear occasionally; these letters do not
-# occur in Russian orthography.
-UKRAINIAN = re.compile(r"[іїєґ]")
-BELARUSIAN = re.compile(r"[ў]")
 
 REFERS_TO_OTHER = re.compile(r"предыдущ\w*\s+вопрос|прошл\w*\s+вопрос")
 HANDOUT_LOST = re.compile(r"раздаточн\w*[^.\]]{0,60}(?:утерян|утрачен|потерян|не сохран)", re.I)
@@ -63,22 +59,6 @@ def detect_kind(question: str) -> str:
     return "blitz" if match.group(1).lower() == "блиц" else "duplet"
 
 
-def detect_lang(text: str) -> str:
-    """Cheap script-based language guess; the corpus is overwhelmingly Russian.
-
-    None of these letters occur in Russian orthography. "ў" is distinctively
-    Belarusian and "ї/є/ґ" distinctively Ukrainian, but both languages use "і"
-    heavily, so the distinctive letters decide and a bare run of "і" falls to
-    Ukrainian, which is the commoner of the two here.
-    """
-    belarusian = len(BELARUSIAN.findall(text))
-    ukrainian = len(UKRAINIAN.findall(text))
-    if belarusian + ukrainian <= 2:
-        return "ru"
-    if belarusian:
-        return "be"
-    return "uk"
-
 
 def normalized_hash(question: str) -> str:
     """Hash of the question with case, punctuation and spacing folded away."""
@@ -99,7 +79,7 @@ def content_hash(*fields: str) -> str:
 def exclusion_reason(question: str, answer: str) -> str | None:
     """Why this row is not a usable question, or None if it is one.
 
-    Deliberately narrow. Attributes such as has_media, taken_down and lang stay
+    Deliberately narrow. Attributes such as has_media and taken_down stay
     queryable on the row instead of removing it, and rules that misfired on real
     data during the audit -- handout references whose material turned out to be
     inline, questions ending in an imperative rather than a question mark -- are

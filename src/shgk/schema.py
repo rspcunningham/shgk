@@ -44,7 +44,6 @@ CREATE TABLE IF NOT EXISTS questions (
     handout_text        TEXT    NOT NULL DEFAULT '',
     host_note           TEXT    NOT NULL DEFAULT '',
     kind                TEXT    NOT NULL DEFAULT 'normal',
-    lang                TEXT    NOT NULL DEFAULT 'ru',
     has_media           INTEGER NOT NULL DEFAULT 0,
     media_urls          TEXT    NOT NULL DEFAULT '[]',
     author_ids          TEXT    NOT NULL DEFAULT '[]',
@@ -73,6 +72,7 @@ CREATE TABLE IF NOT EXISTS question_duplicates (
 CREATE TABLE IF NOT EXISTS translations (
     question_id            INTEGER PRIMARY KEY REFERENCES questions(id),
     content_hash           TEXT    NOT NULL,
+    source_language        TEXT    NOT NULL DEFAULT '',
     status                 TEXT    NOT NULL
                            CHECK (status IN ('translated','adapted','untranslatable')),
     question_en            TEXT    NOT NULL DEFAULT '',

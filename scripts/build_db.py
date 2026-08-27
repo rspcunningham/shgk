@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from shgk.curation import (  # noqa: E402
     content_hash,
     detect_kind,
-    detect_lang,
     normalized_hash,
     rebuild_duplicates,
     rebuild_exclusions,
@@ -103,7 +102,6 @@ def load_questions(source: sqlite3.Connection, target: sqlite3.Connection) -> No
                 handout,
                 host_note,
                 detect_kind(row["question"]),
-                detect_lang(question),
                 1 if media not in ("[]", "") else 0,
                 media,
                 as_json([a.get("id") for a in authors]),
@@ -128,7 +126,7 @@ def load_questions(source: sqlite3.Connection, target: sqlite3.Connection) -> No
         list(packages.values()),
     )
     target.executemany(
-        "INSERT INTO questions VALUES (" + ",".join("?" * 22) + ")", rows
+        "INSERT INTO questions VALUES (" + ",".join("?" * 21) + ")", rows
     )
     print(f"  loaded {len(rows):,} questions across {len(packages):,} packages")
 
@@ -166,6 +164,9 @@ def load_translations(target: sqlite3.Connection) -> None:
             (
                 question_id,
                 current[question_id],
+                # Legacy rows predate language reporting; the next translation
+                # run fills it in.
+                "",
                 row["status"],
                 row["question_en"],
                 row["answer_en"],
@@ -188,7 +189,7 @@ def load_translations(target: sqlite3.Connection) -> None:
             )
         )
     target.executemany(
-        "INSERT OR REPLACE INTO translations VALUES (" + ",".join("?" * 21) + ")",
+        "INSERT OR REPLACE INTO translations VALUES (" + ",".join("?" * 22) + ")",
         carried,
     )
     legacy.close()
