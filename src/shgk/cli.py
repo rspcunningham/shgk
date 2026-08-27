@@ -34,11 +34,6 @@ from .sources.gotquestions import (
     discover_pack_ids,
     parse_pack,
 )
-from .sources.tv import (
-    discover_game_urls,
-    parse_game,
-    season_url,
-)
 from .translation import (
     DEFAULT_CRITIC_MODEL,
     DEFAULT_EDITOR_MODEL,
@@ -175,16 +170,6 @@ def _ingest_gotquestions(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
-def _parse_years(value: str) -> list[int]:
-    if ":" not in value:
-        return [int(value)]
-    start_text, end_text = value.split(":", 1)
-    start, end = int(start_text), int(end_text)
-    if start > end:
-        raise argparse.ArgumentTypeError("year range must be START:END")
-    return list(range(start, end + 1))
-
-
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
@@ -197,81 +182,6 @@ def _nonnegative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be zero or greater")
     return parsed
-
-
-def _ingest_tv(args: argparse.Namespace) -> int:
-    database = QuestionDatabase(args.db)
-    cache = PageCache(args.cache)
-    total: Counter[str] = Counter()
-    failures = 0
-
-    with HttpClient(delay=args.delay, retries=args.retries) as client:
-        game_urls = list(dict.fromkeys(args.game_url or []))
-        if not game_urls:
-            for year in args.years:
-                html = cache.get_text(
-                    "chgk-info-tv",
-                    f"season-{year}",
-                    season_url(year),
-                    client,
-                    refresh=args.refresh,
-                )
-                game_urls.extend(discover_game_urls(html, year=year))
-            game_urls = list(dict.fromkeys(game_urls))
-        if args.limit_games is not None:
-            game_urls = game_urls[: args.limit_games]
-        print(f"Found {len(game_urls)} television game(s)")
-
-        def fetch_game(game_url: str):
-            cache_key = game_url.rstrip("/").rsplit("/", 1)[-1]
-            html = cache.get_text(
-                "chgk-info-tv", cache_key, game_url, client, refresh=args.refresh
-            )
-            return cache_key, parse_game(html, game_url, fetched_at=_utc_now())
-
-        completed = 0
-        iterator = iter(game_urls)
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            pending: dict[Future, str] = {}
-
-            def submit_next() -> bool:
-                try:
-                    game_url = next(iterator)
-                except StopIteration:
-                    return False
-                pending[executor.submit(fetch_game, game_url)] = game_url
-                return True
-
-            for _ in range(min(len(game_urls), args.workers * 2)):
-                submit_next()
-
-            while pending:
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    game_url = pending.pop(future)
-                    completed += 1
-                    try:
-                        cache_key, records = future.result()
-                        counts = database.upsert(records)
-                        total.update(counts)
-                        print(
-                            f"[{completed}/{len(game_urls)}] {cache_key}: "
-                            f"{len(records)} question(s)"
-                        )
-                    except Exception as error:  # keep a long crawl moving
-                        failures += 1
-                        print(
-                            f"[{completed}/{len(game_urls)}] {game_url}: ERROR: {error}",
-                            file=sys.stderr,
-                        )
-                        if args.fail_fast:
-                            raise
-                    submit_next()
-
-    _print_counts("TV import", total)
-    if failures:
-        print(f"failures={failures}", file=sys.stderr)
-    return 1 if failures else 0
 
 
 def _stats(args: argparse.Namespace) -> int:
@@ -711,19 +621,6 @@ def build_parser() -> argparse.ArgumentParser:
     gq_parser.add_argument("--limit-packages", type=int)
     gq_parser.set_defaults(handler=_ingest_gotquestions)
 
-    tv_parser = subparsers.add_parser(
-        "tv", help="fetch television games from chgk-info.ru"
-    )
-    _add_fetch_arguments(tv_parser)
-    tv_parser.add_argument("--game-url", action="append")
-    tv_parser.add_argument(
-        "--years",
-        type=_parse_years,
-        default=_parse_years(str(datetime.now(UTC).year)),
-        metavar="YEAR|START:END",
-    )
-    tv_parser.add_argument("--limit-games", type=int)
-    tv_parser.set_defaults(handler=_ingest_tv)
 
     stats_parser = subparsers.add_parser("stats", help="summarize the corpus")
     stats_parser.add_argument("--db", type=Path, default=DEFAULT_DB)
