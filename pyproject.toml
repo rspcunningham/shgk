@@ -21,9 +21,6 @@ dev = [
     "pytest-cov>=5,<7",
 ]
 
-[project.scripts]
-shgk = "shgk.cli:main"
-
 [tool.setuptools]
 package-dir = {"" = "src"}
 
