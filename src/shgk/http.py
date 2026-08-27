@@ -13,7 +13,7 @@ class HttpClient:
     def __init__(
         self,
         *,
-        delay: float = 1.0,
+        delay: float = 0.0,
         timeout: float = 45.0,
         retries: int = 3,
     ):

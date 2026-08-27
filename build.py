@@ -29,8 +29,10 @@ def main() -> int:
         "--refresh", action="store_true",
         help="re-parse every package, even ones whose page is unchanged",
     )
-    parser.add_argument("--delay", type=float, default=1.0,
-                        help="seconds between requests")
+    parser.add_argument("--workers", type=int, default=8,
+                        help="packages fetched concurrently")
+    parser.add_argument("--delay", type=float, default=0.0,
+                        help="minimum seconds between request starts")
     args = parser.parse_args()
 
     db.initialize(DATABASE)
@@ -39,12 +41,17 @@ def main() -> int:
         with HttpClient(delay=args.delay) as client:
             counts = ingest(
                 connection, client,
-                pages=args.pages, refresh=args.refresh, progress=print,
+                pages=args.pages, refresh=args.refresh,
+                workers=args.workers, progress=print,
             )
-        for label in ("new", "updated", "unchanged", "empty", "parse_error",
-                      "fetch_error", "questions"):
+        reported = False
+        for label in ("new", "updated", "unchanged", "skipped", "empty",
+                      "parse_error", "fetch_error", "questions"):
             if counts.get(label):
                 print(f"  {label:<28}{counts[label]:>10,}")
+                reported = True
+        if not reported:
+            print(f"  {'already up to date':<28}")
 
         print("stage 2: exclusions")
         for reason, count in sorted(

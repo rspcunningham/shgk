@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Callable
@@ -34,20 +35,38 @@ def _index_url(page: int) -> str:
     return BASE_URL if page == 1 else f"{BASE_URL}/?page={page}"
 
 
+# A package is settled once it has been fetched and parsed. Failures are not,
+# so they are retried on the next run.
+SETTLED = ("ok", "empty")
+
+
 def discover(
-    client: HttpClient, *, pages: int | None = None
+    client: HttpClient,
+    *,
+    settled: frozenset[int] = frozenset(),
+    pages: int | None = None,
 ) -> list[int]:
-    """Walk the package index until a page introduces nothing new."""
+    """Walk the package index, newest first, collecting packages to fetch.
+
+    The server offers no ETag or Last-Modified, so a package cannot be checked
+    for changes without downloading it in full. The index is ordered newest
+    first, so once a page contains nothing but packages already settled there is
+    nothing older worth walking to, and crawling stops. That makes the ordinary
+    incremental run cost one index page rather than several hundred.
+    """
     found: list[int] = []
     seen: set[int] = set()
     page = 1
     while pages is None or page <= pages:
-        html = client.get(_index_url(page)).text
-        new = [pack_id for pack_id in discover_pack_ids(html) if pack_id not in seen]
-        if not new:
+        ids = discover_pack_ids(client.get(_index_url(page)).text)
+        if not ids:
             break
-        found.extend(new)
-        seen.update(new)
+        fresh = [pack_id for pack_id in ids if pack_id not in seen]
+        seen.update(fresh)
+        wanted = [pack_id for pack_id in fresh if pack_id not in settled]
+        found.extend(wanted)
+        if not wanted and pages is None:
+            break
         page += 1
     return found
 
@@ -134,51 +153,67 @@ def ingest(
     pack_ids: list[int] | None = None,
     pages: int | None = None,
     refresh: bool = False,
+    workers: int = 8,
     progress: Callable[[str], None] | None = None,
 ) -> Counter[str]:
     """Fetch and store packages.
 
-    A package whose page hashes the same as last time is not re-parsed, which
-    avoids rewriting rows that have not changed. It is still fetched: the hash
-    is only knowable after the request.
+    Pages take seconds each and run to a megabyte, so fetches overlap; parsing
+    and every write stay on the calling thread, since the SQLite connection
+    belongs to it.
     """
-    if pack_ids is None:
-        pack_ids = discover(client, pages=pages)
     known = {
-        row["id"]: row["page_hash"]
-        for row in connection.execute("SELECT id, page_hash FROM packages")
+        row["id"]: (row["status"], row["page_hash"])
+        for row in connection.execute("SELECT id, status, page_hash FROM packages")
     }
-    counts: Counter[str] = Counter()
+    settled = frozenset(
+        pack_id for pack_id, (status, _) in known.items() if status in SETTLED
+    )
+    if pack_ids is None:
+        pack_ids = discover(
+            client, settled=frozenset() if refresh else settled, pages=pages
+        )
+    targets = [p for p in pack_ids if refresh or p not in settled]
+    counts: Counter[str] = Counter(skipped=len(pack_ids) - len(targets))
+    if not targets:
+        return counts
 
-    for index, pack_id in enumerate(pack_ids, start=1):
+    def fetch(pack_id: int) -> tuple[int, str | None, Exception | None]:
         try:
-            html = client.get(PACK_URL.format(pack_id)).text
-        except Exception as error:
-            counts["fetch_error"] += 1
-            _record_failure(connection, pack_id, "http_error", str(error))
-            continue
+            return pack_id, client.get(PACK_URL.format(pack_id)).text, None
+        except Exception as error:  # keep a long crawl moving
+            return pack_id, None, error
 
-        page_hash = sha256(html.encode("utf-8")).hexdigest()[:16]
-        if known.get(pack_id) == page_hash and not refresh:
-            counts["unchanged"] += 1
-            continue
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for pack_id, html, error in pool.map(fetch, targets):
+            done += 1
+            if error is not None:
+                counts["fetch_error"] += 1
+                _record_failure(connection, pack_id, "http_error", str(error))
+                continue
 
-        try:
-            pack = parse_pack(html)
-        except GotQuestionsParseError as error:
-            counts["parse_error"] += 1
-            _record_failure(connection, pack_id, "parse_error", str(error))
-            continue
+            page_hash = sha256(html.encode("utf-8")).hexdigest()[:16]
+            if not refresh and known.get(pack_id, (None, None))[1] == page_hash:
+                counts["unchanged"] += 1
+                continue
 
-        if not pack.questions:
-            counts["empty"] += 1
-            _record_failure(connection, pack_id, "empty", "")
-            continue
+            try:
+                pack = parse_pack(html)
+            except GotQuestionsParseError as error:
+                counts["parse_error"] += 1
+                _record_failure(connection, pack_id, "parse_error", str(error))
+                continue
 
-        _store(connection, pack, page_hash)
-        counts["new" if pack_id not in known else "updated"] += 1
-        counts["questions"] += len(pack.questions)
-        if progress and index % 500 == 0:
-            progress(f"  {index:,}/{len(pack_ids):,} packages")
+            if not pack.questions:
+                counts["empty"] += 1
+                _record_failure(connection, pack_id, "empty", "")
+                continue
+
+            _store(connection, pack, page_hash)
+            counts["new" if pack_id not in known else "updated"] += 1
+            counts["questions"] += len(pack.questions)
+            if progress and done % 200 == 0:
+                progress(f"  {done:,}/{len(targets):,} packages")
     connection.commit()
     return counts
