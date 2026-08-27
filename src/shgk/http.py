@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import gzip
-from pathlib import Path
 from threading import Lock
 import time
 
@@ -70,29 +68,3 @@ class HttpClient:
         assert last_error is not None
         raise last_error
 
-
-class PageCache:
-    def __init__(self, root: str | Path):
-        self.root = Path(root)
-
-    def _path(self, source: str, key: str) -> Path:
-        safe_key = "".join(character if character.isalnum() or character in "-_." else "_" for character in key)
-        return self.root / source / f"{safe_key}.html.gz"
-
-    def get_text(
-        self,
-        source: str,
-        key: str,
-        url: str,
-        client: HttpClient,
-        *,
-        refresh: bool = False,
-    ) -> str:
-        cache_path = self._path(source, key)
-        if cache_path.exists() and not refresh:
-            return gzip.decompress(cache_path.read_bytes()).decode("utf-8")
-        response = client.get(url)
-        text = response.text
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(gzip.compress(text.encode("utf-8"), compresslevel=6))
-        return text

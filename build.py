@@ -16,36 +16,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from shgk import db  # noqa: E402
 from shgk.curation import rebuild_duplicates, rebuild_exclusions  # noqa: E402
-from shgk.http import HttpClient, PageCache  # noqa: E402
+from shgk.http import HttpClient  # noqa: E402
 from shgk.ingest import ingest  # noqa: E402
 
 DATABASE = db.DEFAULT_PATH
-CACHE = Path("data/cache")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pages", type=int, help="index pages to crawl (default: all)")
-    parser.add_argument("--refresh", action="store_true", help="ignore cached pages")
     parser.add_argument(
-        "--offline", action="store_true", help="parse cached pages, make no requests"
+        "--refresh", action="store_true",
+        help="re-parse every package, even ones whose page is unchanged",
     )
-    parser.add_argument("--delay", type=float, default=1.0)
+    parser.add_argument("--delay", type=float, default=1.0,
+                        help="seconds between requests")
     args = parser.parse_args()
 
     db.initialize(DATABASE)
-    cache = PageCache(CACHE)
     with db.connect(DATABASE) as connection:
         print("stage 1: packages")
-        client = None if args.offline else HttpClient(delay=args.delay)
-        try:
+        with HttpClient(delay=args.delay) as client:
             counts = ingest(
-                connection, cache, client,
+                connection, client,
                 pages=args.pages, refresh=args.refresh, progress=print,
             )
-        finally:
-            if client is not None:
-                client.close()
         for label in ("new", "updated", "unchanged", "empty", "parse_error",
                       "fetch_error", "questions"):
             if counts.get(label):

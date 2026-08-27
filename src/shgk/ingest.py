@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Callable
 
-from .http import HttpClient, PageCache
+from .http import HttpClient
 from .sources.gotquestions import (
     BASE_URL,
     PACK_URL,
@@ -35,20 +35,14 @@ def _index_url(page: int) -> str:
 
 
 def discover(
-    cache: PageCache,
-    client: HttpClient,
-    *,
-    pages: int | None = None,
-    refresh: bool = False,
+    client: HttpClient, *, pages: int | None = None
 ) -> list[int]:
     """Walk the package index until a page introduces nothing new."""
     found: list[int] = []
     seen: set[int] = set()
     page = 1
     while pages is None or page <= pages:
-        html = cache.get_text(
-            SOURCE, f"index-{page}", _index_url(page), client, refresh=refresh
-        )
+        html = client.get(_index_url(page)).text
         new = [pack_id for pack_id in discover_pack_ids(html) if pack_id not in seen]
         if not new:
             break
@@ -135,17 +129,21 @@ def _record_failure(
 
 def ingest(
     connection: sqlite3.Connection,
-    cache: PageCache,
-    client: HttpClient | None,
+    client: HttpClient,
     *,
     pack_ids: list[int] | None = None,
     pages: int | None = None,
     refresh: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> Counter[str]:
-    """Fetch and store packages. `client` may be None to work purely from cache."""
+    """Fetch and store packages.
+
+    A package whose page hashes the same as last time is not re-parsed, which
+    avoids rewriting rows that have not changed. It is still fetched: the hash
+    is only knowable after the request.
+    """
     if pack_ids is None:
-        pack_ids = discover(cache, client, pages=pages, refresh=refresh)
+        pack_ids = discover(client, pages=pages)
     known = {
         row["id"]: row["page_hash"]
         for row in connection.execute("SELECT id, page_hash FROM packages")
@@ -154,10 +152,7 @@ def ingest(
 
     for index, pack_id in enumerate(pack_ids, start=1):
         try:
-            html = cache.get_text(
-                SOURCE, f"pack-{pack_id}", PACK_URL.format(pack_id), client,
-                refresh=refresh,
-            )
+            html = client.get(PACK_URL.format(pack_id)).text
         except Exception as error:
             counts["fetch_error"] += 1
             _record_failure(connection, pack_id, "http_error", str(error))
