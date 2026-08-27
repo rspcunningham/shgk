@@ -11,14 +11,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
-import anthropic
 import httpx
 from agents import Agent, ModelSettings, RunConfig, Runner, set_default_openai_client
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 from pydantic import BaseModel, Field
 
-from .providers import ProviderModelFactory, parse_json_payload
+from .db import DEFAULT_PATH as DEFAULT_DB_PATH, connect
 from .translation_policy import TRANSLATION_CONSTITUTION, TRANSLATION_POLICY_VERSION
 
 # Chosen from the 36-config benchmark matrix (benchmarks/results/matrix):
@@ -26,10 +25,11 @@ from .translation_policy import TRANSLATION_CONSTITUTION, TRANSLATION_POLICY_VER
 # tied with sol@low and terra@max) at $0.019/question versus sol@low's $0.081 —
 # roughly $5.6k rather than $23.6k to translate the eligible corpus. Its score
 # gap to the leaders sits inside the measured noise band.
-DEFAULT_TRANSLATOR_MODEL = "gpt-5.6-luna"
-DEFAULT_CRITIC_MODEL = "gpt-5.6-luna"
-DEFAULT_EDITOR_MODEL = "gpt-5.6-luna"
-DEFAULT_REASONING_EFFORT = "max"
+# Not defaults: these are the pipeline. Changing one means rerunning the stage.
+TRANSLATOR_MODEL = "gpt-5.6-luna"
+CRITIC_MODEL = "gpt-5.6-luna"
+EDITOR_MODEL = "gpt-5.6-luna"
+REASONING_EFFORT = "max"
 TRANSLATION_WORKFLOW_VERSION = 13
 
 _TRANSIENT_API_ERRORS = (
@@ -37,10 +37,6 @@ _TRANSIENT_API_ERRORS = (
     APIConnectionError,
     APITimeoutError,
     InternalServerError,
-    anthropic.RateLimitError,
-    anthropic.APIConnectionError,
-    anthropic.APITimeoutError,
-    anthropic.InternalServerError,
     TimeoutError,
 )
 
@@ -80,48 +76,6 @@ def is_transient_error(error: BaseException | str) -> bool:
             "no choices (possible provider error payload)",
         )
     )
-
-TRANSLATION_SCHEMA = """
-CREATE TABLE IF NOT EXISTS translations (
-    source                   TEXT NOT NULL,
-    source_question_id       TEXT NOT NULL,
-    source_content_hash      TEXT NOT NULL,
-    status                   TEXT NOT NULL
-                             CHECK (status IN ('translated', 'adapted', 'untranslatable')),
-    question_en              TEXT NOT NULL,
-    answer_en                TEXT NOT NULL,
-    explanation_en           TEXT NOT NULL,
-    acceptance_criteria_en   TEXT NOT NULL,
-    handout_text_en          TEXT NOT NULL,
-    changes_description      TEXT NOT NULL,
-    untranslatable_reason    TEXT NOT NULL,
-    translator_model         TEXT NOT NULL,
-    critic_model             TEXT NOT NULL,
-    editor_model             TEXT NOT NULL,
-    editor_status            TEXT NOT NULL
-                             CHECK (editor_status IN (
-                                 'unchanged', 'edited', 'needs_rework', 'skipped'
-                             )),
-    reasoning_effort         TEXT NOT NULL,
-    policy_version           INTEGER NOT NULL,
-    workflow_version         INTEGER NOT NULL,
-    translation_attempts     INTEGER NOT NULL,
-    critic_attempts          INTEGER NOT NULL,
-    editor_attempts          INTEGER NOT NULL,
-    api_requests             INTEGER NOT NULL,
-    input_tokens             INTEGER NOT NULL,
-    cached_input_tokens      INTEGER NOT NULL,
-    cache_write_input_tokens INTEGER NOT NULL,
-    output_tokens            INTEGER NOT NULL,
-    reasoning_output_tokens  INTEGER NOT NULL,
-    completed_at             TEXT NOT NULL,
-    PRIMARY KEY (source, source_question_id)
-);
-
-CREATE INDEX IF NOT EXISTS translations_status_idx
-    ON translations(status);
-"""
-
 
 class TranslationCandidate(BaseModel):
     status: Literal["translated", "adapted", "untranslatable"]
@@ -167,9 +121,8 @@ class EnglishEdit(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class TranslationInput:
-    source: str
-    source_question_id: str
-    source_content_hash: str
+    question_id: int
+    content_hash: str
     question: str
     answer: str
     explanation: str
@@ -392,32 +345,19 @@ class AgentsTranslationClient:
 
     def __init__(
         self,
-        translator_model: str = DEFAULT_TRANSLATOR_MODEL,
-        critic_model: str = DEFAULT_CRITIC_MODEL,
-        editor_model: str = DEFAULT_EDITOR_MODEL,
-        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-        provider: str = "openai",
-        native_structured_outputs: bool | None = None,
+        *,
         min_request_interval: float = 0.0,
         transient_retries: int = 6,
     ):
-        self.provider = provider
-        self.translator_model = translator_model
-        self.critic_model = critic_model
-        self.editor_model = editor_model
-        self.reasoning_effort = reasoning_effort
+        self.translator_model = TRANSLATOR_MODEL
+        self.critic_model = CRITIC_MODEL
+        self.editor_model = EDITOR_MODEL
+        self.reasoning_effort = REASONING_EFFORT
         self.min_request_interval = min_request_interval
         self.transient_retries = transient_retries
         self._last_request_at = 0.0
         self._request_lock = asyncio.Lock()
-        model_factory = ProviderModelFactory(provider)
-        if native_structured_outputs is False:
-            self.native_structured_outputs = False
-        else:
-            model_factory.require_structured_outputs(translator_model)
-            model_factory.require_structured_outputs(critic_model)
-            model_factory.require_structured_outputs(editor_model)
-            self.native_structured_outputs = True
+
         # The Agents SDK stamps a fresh prompt_cache_key on every run, which
         # routes each request to a different cache partition: the shared
         # constitution prefix is written every time and never read back (we
@@ -425,64 +365,45 @@ class AgentsTranslationClient:
         # per-agent key restores prefix caching; the version suffix keeps a
         # prompt change from colliding with a stale partition.
         def settings_for(role: str) -> ModelSettings:
-            extra_args = None
-            if provider == "openai":
-                extra_args = {
+            return ModelSettings(
+                max_tokens=_MAX_TOKENS_BY_EFFORT[REASONING_EFFORT],
+                include_usage=True,
+                store=False,
+                reasoning={"effort": REASONING_EFFORT},
+                extra_args={
                     "prompt_cache_key": (
                         f"shgk-translate-p{TRANSLATION_POLICY_VERSION}"
                         f"-w{TRANSLATION_WORKFLOW_VERSION}-{role}"
                     )
-                }
-            return ModelSettings(
-                max_tokens=_MAX_TOKENS_BY_EFFORT.get(reasoning_effort, 2500),
-                include_usage=True,
-                store=False,
-                reasoning={"effort": reasoning_effort},
-                extra_body=(
-                    model_factory.extra_body()
-                    if self.native_structured_outputs
-                    else None
-                ),
-                extra_args=extra_args,
+                },
             )
+
         self.translator = Agent(
             name="ChGK English translator",
-            instructions=self._instructions(_TRANSLATOR_INSTRUCTIONS, TranslationCandidate),
-            model=model_factory.model(translator_model),
+            instructions=_TRANSLATOR_INSTRUCTIONS,
+            model=translator_model,
             model_settings=settings_for("translator"),
-            output_type=(TranslationCandidate if self.native_structured_outputs else None),
+            output_type=TranslationCandidate,
         )
         self.critic = Agent(
             name="ChGK translation critic",
-            instructions=self._instructions(_CRITIC_INSTRUCTIONS, TranslationCritique),
-            model=model_factory.model(critic_model),
+            instructions=_CRITIC_INSTRUCTIONS,
+            model=critic_model,
             model_settings=settings_for("critic"),
-            output_type=(TranslationCritique if self.native_structured_outputs else None),
+            output_type=TranslationCritique,
         )
         self.editor = Agent(
             name="ChGK English copy editor",
-            instructions=self._instructions(_EDITOR_INSTRUCTIONS, EnglishEdit),
-            model=model_factory.model(editor_model),
+            instructions=_EDITOR_INSTRUCTIONS,
+            model=editor_model,
             model_settings=settings_for("editor"),
-            output_type=(EnglishEdit if self.native_structured_outputs else None),
+            output_type=EnglishEdit,
         )
         self.run_config = RunConfig(
             tracing_disabled=True,
             workflow_name="ChGK translation and critique",
         )
 
-    def _instructions(self, instructions: str, output_type: type[BaseModel]) -> str:
-        if self.native_structured_outputs:
-            return instructions
-        schema = json.dumps(output_type.model_json_schema(), ensure_ascii=False)
-        return (
-            f"{instructions}\n\nReturn exactly one valid JSON object and no markdown. "
-            f"It must conform to this JSON Schema: {schema}"
-        )
-
-    @staticmethod
-    def _parse_prompted_json(value: object, output_type: type[BaseModel]) -> BaseModel:
-        return output_type.model_validate(parse_json_payload(value))
 
     async def _run(
         self,
@@ -514,10 +435,7 @@ class AgentsTranslationClient:
                 await asyncio.sleep(min(60.0, 5.0 * (2**retry)))
         if result is None:
             raise AssertionError("unreachable")
-        if self.native_structured_outputs:
-            output = result.final_output_as(output_type, raise_if_incorrect_type=True)
-        else:
-            output = self._parse_prompted_json(result.final_output, output_type)
+        output = result.final_output_as(output_type, raise_if_incorrect_type=True)
         usage = result.context_wrapper.usage
         return AgentCall(
             output=output,
@@ -608,43 +526,6 @@ def install_pooled_openai_client(max_connections: int = 2048) -> None:
     )
     _POOLED_CLIENT_INSTALLED = True
 
-
-def build_translation_client(
-    *,
-    provider: str,
-    translator_model: str,
-    critic_model: str,
-    editor_model: str,
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-    transient_retries: int = 6,
-    min_request_interval: float = 0.0,
-) -> TranslationClient:
-    """Pick the client for a provider.
-
-    Anthropic models use their own SDK (native thinking/effort parameters and
-    structured outputs); everything else goes through the Agents SDK.
-    """
-
-    if provider == "anthropic":
-        from .anthropic_provider import AnthropicTranslationClient
-
-        return AnthropicTranslationClient(
-            translator_model=translator_model,
-            critic_model=critic_model,
-            editor_model=editor_model,
-            reasoning_effort=reasoning_effort,
-            transient_retries=transient_retries,
-            min_request_interval=min_request_interval,
-        )
-    return AgentsTranslationClient(
-        translator_model=translator_model,
-        critic_model=critic_model,
-        editor_model=editor_model,
-        reasoning_effort=reasoning_effort,
-        provider=provider,
-        transient_retries=transient_retries,
-        min_request_interval=min_request_interval,
-    )
 
 
 @dataclass(slots=True)
@@ -934,157 +815,73 @@ async def run_translation_workflow(
 
 
 class TranslationPipeline:
-    def __init__(self, source_db: str | Path, pipeline_db: str | Path):
-        self.source_db = Path(source_db)
-        self.pipeline_db = Path(pipeline_db)
-        if self.source_db.resolve() == self.pipeline_db.resolve():
-            raise ValueError("source and pipeline databases must be separate files")
+    """Stage 4: translate canonical questions that have no current translation."""
 
-    def initialize(self) -> None:
-        self.pipeline_db.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.pipeline_db) as connection:
-            connection.executescript(TRANSLATION_SCHEMA)
+    def __init__(self, database: str | Path = DEFAULT_DB_PATH):
+        self.database = Path(database)
 
     def _pending_inputs(
         self,
         *,
         limit: int,
         offset: int,
-        sample_size: int | None,
-        seed: int,
-        sources: list[str] | None,
         refresh: bool,
-        skip_completed: bool,
     ) -> list[TranslationInput]:
-        if not self.source_db.is_file():
-            raise FileNotFoundError(f"Source database not found: {self.source_db}")
-        if not self.pipeline_db.is_file():
-            raise FileNotFoundError(f"Pipeline database not found: {self.pipeline_db}")
-        source_uri = f"file:{self.source_db.resolve().as_posix()}?mode=ro"
-        source_clause = ""
-        if sample_size is not None and offset:
-            raise ValueError("--offset cannot be combined with --sample-size")
-        parameters: list[object] = []
-        completed_clause = ""
-        if skip_completed and not refresh and sample_size is None:
-            completed_clause = """
+        # A translation is current when it was produced from the question text
+        # that is in the database now; anything else is missing or stale.
+        freshness = (
+            ""
+            if refresh
+            else """
             AND NOT EXISTS (
-                SELECT 1 FROM translations AS result
-                WHERE result.source = question.source
-                  AND result.source_question_id = question.source_question_id
-                  AND result.source_content_hash = question.content_hash
+                SELECT 1 FROM translations AS t
+                WHERE t.question_id = q.id AND t.content_hash = q.content_hash
             )
             """
-        if sources:
-            placeholders = ", ".join("?" for _ in sources)
-            source_clause = f"AND question.source IN ({placeholders})"
-            parameters.extend(sources)
-        if sample_size is None:
-            order_clause = "ORDER BY question.source, question.source_question_id"
-            selected_limit = limit
-            selected_offset = offset
-        else:
-            order_clause = (
-                "ORDER BY sample_key(question.source, "
-                "question.source_question_id, ?)"
-            )
-            parameters.append(seed)
-            selected_limit = sample_size
-            selected_offset = 0
-        parameters.extend((selected_limit, selected_offset))
-
-        with sqlite3.connect(self.pipeline_db, uri=True) as connection:
-            connection.row_factory = sqlite3.Row
-            connection.create_function(
-                "sample_key",
-                3,
-                lambda source, identifier, value: int.from_bytes(
-                    hashlib.sha256(
-                        f"{value}\0{source}\0{identifier}".encode()
-                    ).digest()[:8],
-                    "big",
-                )
-                & ((1 << 63) - 1),
-                deterministic=True,
-            )
-            connection.execute("ATTACH DATABASE ? AS raw", (source_uri,))
+        )
+        with connect(self.database, read_only=True) as connection:
             rows = connection.execute(
                 f"""
-                SELECT question.source, question.source_question_id,
-                       question.content_hash AS source_content_hash,
-                       question.question, question.answer, question.explanation,
-                       question.acceptance_criteria, question.handout_text,
-                       question.package_title
-                FROM raw.questions AS question
-                JOIN basic_filter_results AS basic
-                  ON basic.source = question.source
-                 AND basic.source_question_id = question.source_question_id
-                 AND basic.source_content_hash = question.content_hash
-                WHERE basic.eligible = 1
-                  {completed_clause}
-                  {source_clause}
-                {order_clause}
+                SELECT q.id, q.content_hash, q.question, q.answer, q.explanation,
+                       q.acceptance_criteria, q.handout_text, p.title AS package_title
+                FROM questions_canonical AS q
+                JOIN packages AS p ON p.id = q.package_id
+                WHERE 1 {freshness}
+                ORDER BY q.id
                 LIMIT ? OFFSET ?
                 """,
-                parameters,
+                (limit, offset),
             ).fetchall()
-            if sample_size is not None and skip_completed and not refresh:
-                completed = {
-                    (row["source"], row["source_question_id"], row["source_content_hash"])
-                    for row in connection.execute(
-                        """
-                        SELECT source, source_question_id, source_content_hash
-                        FROM translations
-                        """
-                    )
-                }
-                rows = [
-                    row
-                    for row in rows
-                    if (
-                        row["source"],
-                        row["source_question_id"],
-                        row["source_content_hash"],
-                    )
-                    not in completed
-                ]
-            connection.execute("DETACH DATABASE raw")
         return [
             TranslationInput(
-                **{key: (row[key] or "") for key in TranslationInput.__annotations__}
+                question_id=row["id"],
+                content_hash=row["content_hash"],
+                question=row["question"],
+                answer=row["answer"],
+                explanation=row["explanation"],
+                acceptance_criteria=row["acceptance_criteria"],
+                handout_text=row["handout_text"],
+                package_title=row["package_title"],
             )
             for row in rows
         ]
 
-    def _save(
-        self,
-        source: TranslationInput,
-        result: WorkflowResult,
-        *,
-        translator_model: str,
-        critic_model: str,
-        editor_model: str,
-        reasoning_effort: str,
-    ) -> None:
+    def _save(self, source: TranslationInput, result: WorkflowResult) -> None:
         candidate = result.candidate
-        with sqlite3.connect(self.pipeline_db) as connection:
+        with connect(self.database) as connection:
             connection.execute(
                 """
                 INSERT INTO translations (
-                    source, source_question_id, source_content_hash,
-                    status, question_en, answer_en, explanation_en,
-                    acceptance_criteria_en, handout_text_en, changes_description,
-                    untranslatable_reason, translator_model, critic_model,
-                    editor_model, editor_status, reasoning_effort, policy_version,
-                    workflow_version, translation_attempts, critic_attempts,
-                    editor_attempts, api_requests,
-                    input_tokens, cached_input_tokens, cache_write_input_tokens,
-                    output_tokens, reasoning_output_tokens, completed_at
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                ON CONFLICT(source, source_question_id) DO UPDATE SET
-                    source_content_hash = excluded.source_content_hash,
+                    question_id, content_hash, status, question_en, answer_en,
+                    explanation_en, acceptance_criteria_en, handout_text_en,
+                    changes_description, untranslatable_reason, editor_status,
+                    translation_attempts, critic_attempts, editor_attempts,
+                    api_requests, input_tokens, cached_input_tokens,
+                    cache_write_input_tokens, output_tokens,
+                    reasoning_output_tokens, completed_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(question_id) DO UPDATE SET
+                    content_hash = excluded.content_hash,
                     status = excluded.status,
                     question_en = excluded.question_en,
                     answer_en = excluded.answer_en,
@@ -1093,13 +890,7 @@ class TranslationPipeline:
                     handout_text_en = excluded.handout_text_en,
                     changes_description = excluded.changes_description,
                     untranslatable_reason = excluded.untranslatable_reason,
-                    translator_model = excluded.translator_model,
-                    critic_model = excluded.critic_model,
-                    editor_model = excluded.editor_model,
                     editor_status = excluded.editor_status,
-                    reasoning_effort = excluded.reasoning_effort,
-                    policy_version = excluded.policy_version,
-                    workflow_version = excluded.workflow_version,
                     translation_attempts = excluded.translation_attempts,
                     critic_attempts = excluded.critic_attempts,
                     editor_attempts = excluded.editor_attempts,
@@ -1112,9 +903,8 @@ class TranslationPipeline:
                     completed_at = excluded.completed_at
                 """,
                 (
-                    source.source,
-                    source.source_question_id,
-                    source.source_content_hash,
+                    source.question_id,
+                    source.content_hash,
                     candidate.status,
                     candidate.question_en,
                     candidate.answer_en,
@@ -1123,13 +913,7 @@ class TranslationPipeline:
                     candidate.handout_text_en,
                     candidate.changes_description,
                     candidate.untranslatable_reason,
-                    translator_model,
-                    critic_model,
-                    editor_model,
                     result.editor_status,
-                    reasoning_effort,
-                    TRANSLATION_POLICY_VERSION,
-                    TRANSLATION_WORKFLOW_VERSION,
                     result.translation_attempts,
                     result.critic_attempts,
                     result.editor_attempts,
@@ -1150,29 +934,12 @@ class TranslationPipeline:
         limit: int = 10,
         offset: int = 0,
         max_revisions: int = 2,
-        sample_size: int | None = None,
-        seed: int = 0,
-        sources: list[str] | None = None,
         refresh: bool = False,
-        commit: bool = True,
         fail_fast: bool = False,
         workers: int = 1,
         progress: Callable[[str], None] | None = None,
-        on_result: Callable[[TranslationInput, WorkflowResult], None] | None = None,
     ) -> dict[str, int]:
-        if commit:
-            self.initialize()
-        elif not self.pipeline_db.is_file():
-            raise FileNotFoundError(f"Pipeline database not found: {self.pipeline_db}")
-        inputs = self._pending_inputs(
-            limit=limit,
-            offset=offset,
-            sample_size=sample_size,
-            seed=seed,
-            sources=sources,
-            refresh=refresh,
-            skip_completed=commit,
-        )
+        inputs = self._pending_inputs(limit=limit, offset=offset, refresh=refresh)
         counts = {"selected": len(inputs), "completed": 0, "errors": 0}
         semaphore = asyncio.Semaphore(max(1, workers))
         finished = 0
@@ -1189,30 +956,20 @@ class TranslationPipeline:
                     finished += 1
                     if progress:
                         progress(
-                            f"[{finished}/{len(inputs)}] {source.source}/"
-                            f"{source.source_question_id}: ERROR: {error}"
+                            f"[{finished}/{len(inputs)}] {source.question_id}: "
+                            f"ERROR: {error}"
                         )
                     if fail_fast:
                         raise
                     return
-                if commit:
-                    self._save(
-                        source,
-                        result,
-                        translator_model=client.translator_model,
-                        critic_model=client.critic_model,
-                        editor_model=client.editor_model,
-                        reasoning_effort=client.reasoning_effort,
-                    )
-                if on_result:
-                    on_result(source, result)
+                self._save(source, result)
                 counts["completed"] += 1
                 finished += 1
                 if progress:
                     progress(
-                        f"[{finished}/{len(inputs)}] {source.source}/"
-                        f"{source.source_question_id}: {result.candidate.status} "
-                        f"({result.translation_attempts} translation attempt(s))"
+                        f"[{finished}/{len(inputs)}] {source.question_id}: "
+                        f"{result.candidate.status} "
+                        f"({result.translation_attempts} attempt(s))"
                     )
 
         async with asyncio.TaskGroup() as group:
@@ -1220,26 +977,35 @@ class TranslationPipeline:
                 group.create_task(translate_one(source))
         return counts
 
-    def stats(self) -> list[dict[str, object]]:
-        self.initialize()
-        with sqlite3.connect(self.pipeline_db) as connection:
-            connection.row_factory = sqlite3.Row
-            rows = connection.execute(
+    def stats(self) -> dict[str, object]:
+        with connect(self.database, read_only=True) as connection:
+            by_status = {
+                row["status"]: row["questions"]
+                for row in connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS questions
+                    FROM translations GROUP BY status
+                    """
+                )
+            }
+            totals = connection.execute(
                 """
-                SELECT translator_model, critic_model, editor_model,
-                       reasoning_effort, status, editor_status,
-                       COUNT(*) AS questions,
+                SELECT COUNT(*) AS translations,
                        SUM(api_requests) AS api_requests,
                        SUM(input_tokens) AS input_tokens,
                        SUM(cached_input_tokens) AS cached_input_tokens,
-                       SUM(cache_write_input_tokens) AS cache_write_input_tokens,
                        SUM(output_tokens) AS output_tokens,
                        SUM(reasoning_output_tokens) AS reasoning_output_tokens
                 FROM translations
-                GROUP BY translator_model, critic_model, editor_model,
-                         reasoning_effort, status, editor_status
-                ORDER BY translator_model, critic_model, editor_model,
-                         reasoning_effort, status, editor_status
                 """
-            ).fetchall()
-        return [dict(row) for row in rows]
+            ).fetchone()
+            pending = connection.execute(
+                """
+                SELECT COUNT(*) FROM questions_canonical AS q
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM translations AS t
+                    WHERE t.question_id = q.id AND t.content_hash = q.content_hash
+                )
+                """
+            ).fetchone()[0]
+        return {"by_status": by_status, "pending": pending, **dict(totals)}

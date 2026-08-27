@@ -156,12 +156,11 @@ load();
 
 
 class _Handler(BaseHTTPRequestHandler):
-    def __init__(self, *args, source_db: Path, pipeline_db: Path, **kwargs):
+    def __init__(self, *args, database: Path, **kwargs):
         # A reader is opened per request rather than shared: SQLite connections
         # are bound to the thread that created them, and each request here runs
         # on its own thread. Opening a connection is cheap.
-        self._source_db = source_db
-        self._pipeline_db = pipeline_db
+        self._database = database
         super().__init__(*args, **kwargs)
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
@@ -176,8 +175,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
         elif self.path == "/api/question":
             try:
-                with CorpusReader(self._source_db, self._pipeline_db) as reader:
-                    quad = reader.random_quad()
+                with CorpusReader(self._database) as reader:
+                    quad = reader.random()
             except LookupError as error:
                 self._send(
                     503,
@@ -195,16 +194,15 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def serve(
-    source_db: str | Path,
-    pipeline_db: str | Path,
+    database: str | Path,
     *,
     host: str = "127.0.0.1",
     port: int = 8765,
 ) -> None:
-    source_db, pipeline_db = Path(source_db), Path(pipeline_db)
+    database = Path(database)
     # Fail loudly at startup rather than on the first request.
-    CorpusReader(source_db, pipeline_db).close()
-    handler = partial(_Handler, source_db=source_db, pipeline_db=pipeline_db)
+    CorpusReader(database).close()
+    handler = partial(_Handler, database=database)
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Reading questions at http://{host}:{port}  (Ctrl-C to stop)")
     try:

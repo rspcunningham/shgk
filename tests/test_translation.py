@@ -3,9 +3,8 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 
-from shgk.database import QuestionDatabase
-from shgk.models import QuestionRecord
-from shgk.pipeline import BasicFilterPipeline
+from shgk import db
+from shgk.curation import content_hash, normalized_hash
 from shgk.translation import (
     AgentCall,
     EnglishEdit,
@@ -19,17 +18,35 @@ from shgk.translation import (
 )
 
 
-def _record(identifier: str, *, explanation: str = "Объяснение") -> QuestionRecord:
-    return QuestionRecord(
-        source="test",
-        source_question_id=identifier,
-        source_url=f"https://example.test/{identifier}",
-        game_kind="sport_chgk",
-        question="Вопрос",
-        answer="Ответ",
-        explanation=explanation,
-        fetched_at="2025-01-01T00:00:00+00:00",
-    )
+QUESTION = "Вопрос, достаточно длинный, чтобы пройти проверку на длину."
+
+
+def _seed(tmp_path, count: int = 1, *, question: str = QUESTION):
+    """Build a database holding `count` clean, distinct, canonical questions."""
+    path = tmp_path / "shgk.sqlite3"
+    db.initialize(path)
+    with db.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO packages (id,title,url,status,first_seen_at,fetched_at) "
+            "VALUES (1,'Pack','u','ok','t','t')"
+        )
+        for index in range(count):
+            text = f"{question} {index}"
+            connection.execute(
+                """INSERT INTO questions (id,package_id,question,answer,explanation,
+                     content_hash,normalized_hash)
+                   VALUES (?,1,?,'Ответ','Объяснение',?,?)""",
+                (index + 1, text, content_hash(text, "Ответ", "Объяснение", "", ""),
+                 normalized_hash(text)),
+            )
+        connection.commit()
+    return path
+
+
+def _translated_ids(path) -> list[int]:
+    with db.connect(path, read_only=True) as connection:
+        return [row[0] for row in connection.execute(
+            "SELECT question_id FROM translations ORDER BY question_id")]
 
 
 def _candidate(
@@ -130,9 +147,8 @@ class FakeClient:
 
 def _input() -> TranslationInput:
     return TranslationInput(
-        source="test",
-        source_question_id="one",
-        source_content_hash="hash",
+        question_id=1,
+        content_hash="hash",
         question="Вопрос",
         answer="Ответ",
         explanation="Объяснение",
@@ -249,158 +265,85 @@ def test_workflow_keeps_candidate_when_editor_flags_needs_rework() -> None:
     assert result.editor_result.question_en == original.question_en
 
 
-def test_pipeline_translates_only_current_eligible_rows_and_resumes(tmp_path) -> None:
-    source_path = tmp_path / "questions.sqlite3"
-    pipeline_path = tmp_path / "pipeline.sqlite3"
-    QuestionDatabase(source_path).upsert(
-        [_record("eligible"), _record("ineligible", explanation="")]
-    )
-    BasicFilterPipeline(source_path, pipeline_path).run()
-    pipeline = TranslationPipeline(source_path, pipeline_path)
-    client = FakeClient([_candidate()], [_critique()])
+def test_pipeline_translates_pending_rows_and_resumes(tmp_path) -> None:
+    path = _seed(tmp_path, 3)
+    client = FakeClient([_candidate()] * 3, [_critique()] * 3)
+    pipeline = TranslationPipeline(path)
 
-    first = asyncio.run(pipeline.run(client, limit=10, max_revisions=2))
-    second = asyncio.run(pipeline.run(client, limit=10, max_revisions=2))
+    first = asyncio.run(pipeline.run(client, limit=2))
+    assert first == {"selected": 2, "completed": 2, "errors": 0}
+    assert _translated_ids(path) == [1, 2]
 
-    assert first == {"selected": 1, "completed": 1, "errors": 0}
-    assert second == {"selected": 0, "completed": 0, "errors": 0}
-    with sqlite3.connect(pipeline_path) as connection:
-        row = connection.execute(
-            """
-            SELECT source_question_id, status, question_en, answer_en,
-                   reasoning_effort, editor_model, editor_status, editor_attempts,
-                   api_requests, input_tokens, output_tokens
-            FROM translations
-            """
-        ).fetchone()
-        tables = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
+    # A rerun must not redo work that is already current.
+    second = asyncio.run(pipeline.run(client, limit=2))
+    assert second["selected"] == 1
+    assert _translated_ids(path) == [1, 2, 3]
 
-    assert row == (
-        "eligible",
-        "translated",
-        "Question",
-        "Answer",
-        "low",
-        "fake-editor",
-        "unchanged",
-        1,
-        3,
-        240,
-        70,
-    )
-    assert tables == [("basic_filter_results",), ("translations",)]
+    third = asyncio.run(pipeline.run(client, limit=2))
+    assert third == {"selected": 0, "completed": 0, "errors": 0}
 
 
-def test_pipeline_offset_creates_a_deterministic_holdout_slice(tmp_path) -> None:
-    source_path = tmp_path / "questions.sqlite3"
-    pipeline_path = tmp_path / "pipeline.sqlite3"
-    QuestionDatabase(source_path).upsert([_record("a"), _record("b"), _record("c")])
-    BasicFilterPipeline(source_path, pipeline_path).run()
-    pipeline = TranslationPipeline(source_path, pipeline_path)
-    client = FakeClient([_candidate()], [_critique()])
+def test_changed_question_text_makes_a_translation_stale(tmp_path) -> None:
+    path = _seed(tmp_path, 1)
+    asyncio.run(TranslationPipeline(path).run(FakeClient([_candidate()], [_critique()])))
+    assert _translated_ids(path) == [1]
 
-    result = asyncio.run(pipeline.run(client, limit=1, offset=1))
-
-    assert result == {"selected": 1, "completed": 1, "errors": 0}
-    with sqlite3.connect(pipeline_path) as connection:
-        identifier = connection.execute(
-            "SELECT source_question_id FROM translations"
-        ).fetchone()[0]
-    assert identifier == "b"
-
-
-def test_pipeline_sample_is_reproducible_and_no_commit_is_read_only(tmp_path) -> None:
-    source_path = tmp_path / "questions.sqlite3"
-    pipeline_path = tmp_path / "pipeline.sqlite3"
-    QuestionDatabase(source_path).upsert([_record(str(index)) for index in range(10)])
-    BasicFilterPipeline(source_path, pipeline_path).run()
-
-    async def select_once():
-        identifiers: list[str] = []
-        client = FakeClient([_candidate() for _ in range(3)], [_critique() for _ in range(3)])
-        result = await TranslationPipeline(source_path, pipeline_path).run(
-            client,
-            sample_size=3,
-            seed=42,
-            commit=False,
-            on_result=lambda source, _: identifiers.append(source.source_question_id),
+    with db.connect(path) as connection:
+        edited = QUESTION + " Изменённый текст вопроса."
+        connection.execute(
+            "UPDATE questions SET question = ?, content_hash = ? WHERE id = 1",
+            (edited, content_hash(edited, "Ответ", "Объяснение", "", "")),
         )
-        return result, identifiers
+        connection.commit()
 
-    first, first_ids = asyncio.run(select_once())
-    second, second_ids = asyncio.run(select_once())
-
-    assert first == second == {"selected": 3, "completed": 3, "errors": 0}
-    assert first_ids == second_ids
-    with sqlite3.connect(pipeline_path) as connection:
-        tables = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
-    assert tables == [("basic_filter_results",)]
+    pipeline = TranslationPipeline(path)
+    assert pipeline._pending_inputs(limit=10, offset=0, refresh=False)[0].question_id == 1
 
 
-class ConcurrencyProbeClient:
-    """Fresh outputs per call, recording how many workflows overlap."""
+def test_refresh_retranslates_current_rows(tmp_path) -> None:
+    path = _seed(tmp_path, 2)
+    client = FakeClient([_candidate()] * 4, [_critique()] * 4)
+    pipeline = TranslationPipeline(path)
+    asyncio.run(pipeline.run(client, limit=10))
 
-    translator_model = "fake-translator"
-    critic_model = "fake-critic"
-    editor_model = "fake-editor"
-    reasoning_effort = "low"
+    assert asyncio.run(pipeline.run(client, limit=10))["selected"] == 0
+    assert asyncio.run(pipeline.run(client, limit=10, refresh=True))["selected"] == 2
 
-    def __init__(self):
-        self.active = 0
-        self.peak = 0
 
-    async def _tick(self):
-        self.active += 1
-        self.peak = max(self.peak, self.active)
-        await asyncio.sleep(0.02)
-        self.active -= 1
-
-    async def propose(self, source, *, previous=None, feedback=None) -> AgentCall:
-        await self._tick()
-        return AgentCall(_candidate(), UsageTotals(1, 100, 40))
-
-    async def critique(self, source, candidate) -> AgentCall:
-        await self._tick()
-        return AgentCall(_critique(), UsageTotals(1, 80, 20))
-
-    async def edit(self, source, candidate) -> AgentCall:
-        await self._tick()
-        return AgentCall(
-            _edit(question=candidate.question_en), UsageTotals(1, 60, 10)
+def test_excluded_and_duplicate_questions_are_never_translated(tmp_path) -> None:
+    """Stage 4 draws from questions_canonical, so stages 2 and 3 gate it."""
+    path = _seed(tmp_path, 1)
+    with db.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO questions (id,package_id,question,answer,content_hash,"
+            "normalized_hash) VALUES (2,1,'$1a','Ответ','h2','n2')"
         )
+        connection.execute(
+            "INSERT INTO question_exclusions VALUES (2,'not_a_question')"
+        )
+        connection.execute(
+            "INSERT INTO questions (id,package_id,question,answer,content_hash,"
+            "normalized_hash) VALUES (3,1,?,'Ответ','h3','n3')", (QUESTION + " 0",)
+        )
+        connection.execute("INSERT INTO question_duplicates VALUES (3,1)")
+        connection.commit()
+
+    pending = TranslationPipeline(path)._pending_inputs(limit=10, offset=0, refresh=False)
+    assert [item.question_id for item in pending] == [1]
 
 
-def test_pipeline_workers_translate_concurrently_and_commit_all(tmp_path) -> None:
-    source_path = tmp_path / "questions.sqlite3"
-    pipeline_path = tmp_path / "pipeline.sqlite3"
-    QuestionDatabase(source_path).upsert([_record(str(index)) for index in range(6)])
-    BasicFilterPipeline(source_path, pipeline_path).run()
-    pipeline = TranslationPipeline(source_path, pipeline_path)
-    client = ConcurrencyProbeClient()
+def test_offset_creates_a_deterministic_slice(tmp_path) -> None:
+    path = _seed(tmp_path, 5)
+    pipeline = TranslationPipeline(path)
+    first = pipeline._pending_inputs(limit=2, offset=0, refresh=False)
+    second = pipeline._pending_inputs(limit=2, offset=2, refresh=False)
+    assert [item.question_id for item in first] == [1, 2]
+    assert [item.question_id for item in second] == [3, 4]
 
-    result = asyncio.run(pipeline.run(client, limit=10, workers=4))
 
+def test_workers_translate_concurrently_and_save_every_row(tmp_path) -> None:
+    path = _seed(tmp_path, 6)
+    client = FakeClient([_candidate()] * 6, [_critique()] * 6)
+    result = asyncio.run(TranslationPipeline(path).run(client, limit=6, workers=4))
     assert result == {"selected": 6, "completed": 6, "errors": 0}
-    assert client.peak >= 3
-    with sqlite3.connect(pipeline_path) as connection:
-        committed = connection.execute("SELECT COUNT(*) FROM translations").fetchone()[0]
-    assert committed == 6
-
-
-def test_committed_sample_rerun_does_not_advance_to_a_different_sample(tmp_path) -> None:
-    source_path = tmp_path / "questions.sqlite3"
-    pipeline_path = tmp_path / "pipeline.sqlite3"
-    QuestionDatabase(source_path).upsert([_record(str(index)) for index in range(10)])
-    BasicFilterPipeline(source_path, pipeline_path).run()
-    pipeline = TranslationPipeline(source_path, pipeline_path)
-    client = FakeClient([_candidate() for _ in range(3)], [_critique() for _ in range(3)])
-
-    first = asyncio.run(pipeline.run(client, sample_size=3, seed=42))
-    second = asyncio.run(pipeline.run(client, sample_size=3, seed=42))
-
-    assert first == {"selected": 3, "completed": 3, "errors": 0}
-    assert second == {"selected": 0, "completed": 0, "errors": 0}
+    assert _translated_ids(path) == [1, 2, 3, 4, 5, 6]

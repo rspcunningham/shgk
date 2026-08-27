@@ -1,9 +1,11 @@
+"""Read English/Russian question pairs out of the curated views."""
+
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from types import TracebackType
+
+from .db import DEFAULT_PATH, connect
 
 
 def _with_explanation(answer: str, explanation: str) -> str:
@@ -13,78 +15,49 @@ def _with_explanation(answer: str, explanation: str) -> str:
 @dataclass(frozen=True, slots=True)
 class Quad:
     id: int
-    english_question: str | None
+    english_question: str
     russian_question: str
-    english_answer: str | None
+    english_answer: str
     russian_answer: str
 
 
+_SELECT = """
+    SELECT id, question, answer, explanation,
+           question_en, answer_en, explanation_en
+    FROM questions_translated
+"""
+
+
 class CorpusReader:
-    """Read English/Russian question-answer quads by source question id."""
+    """Reads the questions_translated view, which is already the quad join."""
 
-    def __init__(self, source_db: str | Path, pipeline_db: str | Path):
-        source_path = Path(source_db)
-        pipeline_path = Path(pipeline_db)
-        if not source_path.is_file():
-            raise FileNotFoundError(f"Source database not found: {source_path}")
-        if not pipeline_path.is_file():
-            raise FileNotFoundError(f"Pipeline database not found: {pipeline_path}")
-        source_uri = f"file:{source_path.resolve().as_posix()}?mode=ro"
-        pipeline_uri = f"file:{pipeline_path.resolve().as_posix()}?mode=ro"
-        self._connection = sqlite3.connect(source_uri, uri=True)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("ATTACH DATABASE ? AS pipeline", (pipeline_uri,))
+    def __init__(self, database: str | Path = DEFAULT_PATH):
+        self._connection = connect(database, read_only=True)
 
-    def read(self, id: int) -> Quad:
-        row = self._connection.execute(
-            """
-            SELECT question.id, question.question, question.answer,
-                   question.explanation,
-                   translation.status, translation.question_en,
-                   translation.answer_en, translation.explanation_en
-            FROM questions AS question
-            LEFT JOIN pipeline.translations AS translation
-              ON translation.source = question.source
-             AND translation.source_question_id = question.source_question_id
-            WHERE question.id = ?
-            """,
-            (id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"No question with id {id}")
-
-        translated = row["status"] in ("translated", "adapted")
+    def _quad(self, row) -> Quad:
         return Quad(
             id=row["id"],
-            english_question=row["question_en"] if translated else None,
+            english_question=row["question_en"],
             russian_question=row["question"],
-            english_answer=(
-                _with_explanation(row["answer_en"], row["explanation_en"])
-                if translated
-                else None
-            ),
-            russian_answer=_with_explanation(
-                row["answer"], row["explanation"] or ""
-            ),
+            english_answer=_with_explanation(row["answer_en"], row["explanation_en"]),
+            russian_answer=_with_explanation(row["answer"], row["explanation"]),
         )
 
-    def random_quad(self) -> Quad:
-        """A random question that has usable English text."""
+    def read(self, question_id: int) -> Quad:
         row = self._connection.execute(
-            """
-            SELECT question.id
-            FROM pipeline.translations AS translation
-            JOIN questions AS question
-              ON question.source = translation.source
-             AND question.source_question_id = translation.source_question_id
-            WHERE translation.status IN ('translated', 'adapted')
-            ORDER BY RANDOM()
-            LIMIT 1
-            """
+            f"{_SELECT} WHERE id = ?", (question_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"No translated question with id {question_id}")
+        return self._quad(row)
+
+    def random(self) -> Quad:
+        row = self._connection.execute(
+            f"{_SELECT} ORDER BY RANDOM() LIMIT 1"
         ).fetchone()
         if row is None:
             raise LookupError("No translated questions available")
-        return self.read(row["id"])
+        return self._quad(row)
 
     def close(self) -> None:
         self._connection.close()
@@ -92,10 +65,5 @@ class CorpusReader:
     def __enter__(self) -> CorpusReader:
         return self
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
+    def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()

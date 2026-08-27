@@ -9,3 +9,4 @@ data/
 benchmark/
 benchmarks/results/
 runs/
+*.egg-info/
