@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from shgk.progress import Progress
 from shgk.translation import AgentsTranslationClient, TranslationPipeline
 from shgk.translation.pipeline import RunResult
+from shgk.translation.pricing import cost
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,10 +43,13 @@ def report(result: RunResult) -> None:
         f"input {usage.input_tokens:,} ({usage.cached_input_tokens:,} cached), "
         f"output {usage.output_tokens:,} ({usage.reasoning_output_tokens:,} reasoning)"
     )
+    spent = cost(usage)
     print(
         f"       per question: input {usage.input_tokens / result.completed:,.0f}, "
-        f"output {usage.output_tokens / result.completed:,.0f}"
+        f"output {usage.output_tokens / result.completed:,.0f}, "
+        f"${spent / result.completed:.4f}"
     )
+    print(f"cost:  ${spent:,.2f}")
 
 
 def main() -> int:
