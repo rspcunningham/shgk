@@ -14,7 +14,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from ..curation import content_hash, detect_kind, normalized_hash, split_host_note
+from ..curation import content_hash, detect_kind, split_host_note
 
 BASE_URL = "https://gotquestions.online"
 PACK_URL = BASE_URL + "/pack/{}"
@@ -70,7 +70,6 @@ class ParsedQuestion:
     solve_percentages: str
     correct_answers: str
     content_hash: str
-    normalized_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,7 +178,6 @@ def _question(raw: dict[str, Any]) -> ParsedQuestion:
         solve_percentages=_json(raw.get("complexity") or []),
         correct_answers=_json(raw.get("correct_answers") or []),
         content_hash=content_hash(question, answer, explanation, criteria, handout),
-        normalized_hash=normalized_hash(question),
     )
 
 

@@ -2,7 +2,9 @@
 
 Stages 2 and 3 are pure functions of stored text and rebuild in seconds, so
 they run unconditionally. Translation is not here: it costs money per question
-and is driven separately.
+and is driven separately. What the build does do to stage 4 is drop any
+translation whose canonical record no longer exists as translated, so the
+stages stay strictly derived from one another.
 """
 
 from __future__ import annotations
@@ -13,17 +15,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import db
-from .curation import rebuild_duplicates, rebuild_exclusions
+from .curation import rebuild_canonical, rebuild_exclusions
 from .http import Fetcher
 from .ingest import ingest
 from .progress import Reporter
+from .translation.pipeline import prune_translations
 
 PENDING_TRANSLATION = """
 SELECT COUNT(*) FROM questions_canonical AS q
-WHERE NOT EXISTS (
-    SELECT 1 FROM translations AS t
-    WHERE t.question_id = q.id AND t.content_hash = q.content_hash
-)
+WHERE NOT EXISTS (SELECT 1 FROM translations AS t WHERE t.question_id = q.id)
 """
 
 
@@ -42,8 +42,8 @@ class CorpusStats:
 class BuildReport:
     fetched: Counter[str] = field(default_factory=Counter)
     exclusions: dict[str, int] = field(default_factory=dict)
-    duplicate_groups: int = 0
-    duplicate_rows: int = 0
+    canonical: dict[str, int] = field(default_factory=dict)
+    translations_dropped: int = 0
     stats: CorpusStats = field(default_factory=CorpusStats)
 
 
@@ -82,9 +82,8 @@ def build(
             )
         )
         report.exclusions = rebuild_exclusions(connection)
-        duplicates = rebuild_duplicates(connection)
-        report.duplicate_groups = duplicates["groups"]
-        report.duplicate_rows = duplicates["duplicates"]
+        report.canonical = rebuild_canonical(connection)
+        report.translations_dropped = prune_translations(connection)
         connection.commit()
         report.stats = stats(connection)
     return report

@@ -117,8 +117,8 @@ def _store(connection: sqlite3.Connection, pack: ParsedPack, page_hash: str) -> 
             explanation, acceptance_criteria, handout_text, host_note, kind,
             has_media, media_urls, author_ids, author_names, tournament_ids,
             source_references, taken_down, solve_percentages, correct_answers,
-            content_hash, normalized_hash)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            content_hash)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             package_id = excluded.package_id,
             question_number = excluded.question_number,
@@ -134,15 +134,14 @@ def _store(connection: sqlite3.Connection, pack: ParsedPack, page_hash: str) -> 
             taken_down = excluded.taken_down,
             solve_percentages = excluded.solve_percentages,
             correct_answers = excluded.correct_answers,
-            content_hash = excluded.content_hash,
-            normalized_hash = excluded.normalized_hash
+            content_hash = excluded.content_hash
         """,
         [
             (q.id, pack.id, q.question_number, q.question, q.answer, q.explanation,
              q.acceptance_criteria, q.handout_text, q.host_note, q.kind, q.has_media,
              q.media_urls, q.author_ids, q.author_names, q.tournament_ids,
              q.source_references, q.taken_down, q.solve_percentages,
-             q.correct_answers, q.content_hash, q.normalized_hash)
+             q.correct_answers, q.content_hash)
             for q in pack.questions
         ],
     )

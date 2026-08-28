@@ -53,9 +53,10 @@ def report(built: corpus.BuildReport) -> None:
     for reason, count in sorted(built.exclusions.items(), key=lambda item: -item[1]):
         row(reason, count)
 
-    print("stage 3: duplicates")
-    row("duplicate groups", built.duplicate_groups)
-    row("non-canonical rows", built.duplicate_rows)
+    print("stage 3: canonical")
+    row("merged from reprints", built.canonical["merged"])
+    row("reprints folded in", built.canonical["reprints"])
+    row("translations dropped", built.translations_dropped)
 
     print("corpus")
     row("questions", built.stats.questions)

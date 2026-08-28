@@ -2,14 +2,20 @@
 
 Four stages live here, each idempotent and separately rebuildable:
 
-1. ``questions`` / ``packages`` -- the raw scrape target.
-2. ``question_exclusions``      -- rows that are not a usable question at all.
-3. ``question_duplicates``      -- non-canonical reprints of another question.
-4. ``translations``            -- the expensive stage, keyed on content_hash.
+1. ``packages`` / ``questions``  -- the raw scrape target.
+2. ``question_exclusions``       -- rows that are not a usable question at all.
+3. ``questions_canonical``       -- one merged record per distinct question,
+   with ``question_printings``   -- mapping every clean row to its record.
+4. ``translations``              -- the expensive stage, keyed on content_hash.
 
-Stages 2 and 3 are pure functions of the question text and rebuild from scratch
-in seconds, so they carry no incremental bookkeeping. Only stage 4 costs money,
-which is why it alone records the content_hash it was produced from.
+Each stage is derived from the one before it and nothing else. Stages 2 and 3
+are pure functions of the question text and rebuild from scratch in seconds, so
+they carry no incremental bookkeeping -- not even the grouping hash, which
+stage 3 derives on the fly so that changing how text is folded never leaves a
+stored column behind. Only stage 4 costs money, which is why it alone records
+the content_hash it was produced from; a translation whose hash no longer
+matches its canonical record is deleted when stage 3 is rebuilt, so every row
+in stage 4 is always a row in stage 3.
 """
 
 from __future__ import annotations
@@ -53,8 +59,7 @@ CREATE TABLE IF NOT EXISTS questions (
     taken_down          INTEGER NOT NULL DEFAULT 0,
     solve_percentages   TEXT    NOT NULL DEFAULT '[]',
     correct_answers     TEXT    NOT NULL DEFAULT '[]',
-    content_hash        TEXT    NOT NULL,
-    normalized_hash     TEXT    NOT NULL
+    content_hash        TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS question_exclusions (
@@ -62,15 +67,54 @@ CREATE TABLE IF NOT EXISTS question_exclusions (
     reason      TEXT NOT NULL
 );
 
--- Only non-canonical rows are listed; the canonical row is absent from this
--- table, so questions_canonical is a plain anti-join.
-CREATE TABLE IF NOT EXISTS question_duplicates (
-    question_id  INTEGER PRIMARY KEY REFERENCES questions(id),
-    canonical_id INTEGER NOT NULL REFERENCES questions(id)
+-- One record per distinct question, assembled from every printing of it.
+-- Columns mirror ``questions``. Identity and text come from the earliest
+-- printing; each supplementary text field is the longest version any printing
+-- carries; tournament_ids is the union; and the play data is pooled, with the
+-- paired arrays concatenated rather than reduced so a per-playing distribution
+-- stays available. content_hash covers the merged text, so a translation goes
+-- stale exactly when a new printing adds something to translate.
+-- solve_rate is NULL when no printing recorded a measurable field.
+CREATE TABLE IF NOT EXISTS questions_canonical (
+    id                  INTEGER PRIMARY KEY REFERENCES questions(id),
+    package_id          INTEGER NOT NULL REFERENCES packages(id),
+    question_number     INTEGER,
+    question            TEXT    NOT NULL,
+    answer              TEXT    NOT NULL,
+    explanation         TEXT    NOT NULL DEFAULT '',
+    acceptance_criteria TEXT    NOT NULL DEFAULT '',
+    handout_text        TEXT    NOT NULL DEFAULT '',
+    host_note           TEXT    NOT NULL DEFAULT '',
+    kind                TEXT    NOT NULL DEFAULT 'normal',
+    has_media           INTEGER NOT NULL DEFAULT 0,
+    media_urls          TEXT    NOT NULL DEFAULT '[]',
+    author_ids          TEXT    NOT NULL DEFAULT '[]',
+    author_names        TEXT    NOT NULL DEFAULT '[]',
+    tournament_ids      TEXT    NOT NULL DEFAULT '[]',
+    source_references   TEXT    NOT NULL DEFAULT '',
+    taken_down          INTEGER NOT NULL DEFAULT 0,
+    solve_percentages   TEXT    NOT NULL DEFAULT '[]',
+    correct_answers     TEXT    NOT NULL DEFAULT '[]',
+    content_hash        TEXT    NOT NULL,
+    printings           INTEGER NOT NULL DEFAULT 1,
+    playings            INTEGER NOT NULL DEFAULT 0,
+    total_teams         REAL    NOT NULL DEFAULT 0,
+    solve_rate          REAL
 );
 
+-- Every clean row, and the canonical record it contributed to. A record's own
+-- row maps to itself, so reprints are the rows where the two ids differ.
+CREATE TABLE IF NOT EXISTS question_printings (
+    question_id  INTEGER PRIMARY KEY REFERENCES questions(id),
+    canonical_id INTEGER NOT NULL REFERENCES questions_canonical(id)
+);
+
+-- Deferred so that stage 3 can delete and re-insert the canonical records
+-- underneath existing translations; the orphans are pruned before commit.
 CREATE TABLE IF NOT EXISTS translations (
-    question_id            INTEGER PRIMARY KEY REFERENCES questions(id),
+    question_id            INTEGER PRIMARY KEY
+                           REFERENCES questions_canonical(id)
+                           DEFERRABLE INITIALLY DEFERRED,
     content_hash           TEXT    NOT NULL,
     status                 TEXT    NOT NULL
                            CHECK (status IN ('translated','adapted','untranslatable')),
@@ -97,15 +141,13 @@ CREATE TABLE IF NOT EXISTS translations (
 );
 
 CREATE INDEX IF NOT EXISTS questions_package_idx ON questions(package_id);
-CREATE INDEX IF NOT EXISTS questions_norm_idx    ON questions(normalized_hash);
-CREATE INDEX IF NOT EXISTS duplicates_canonical_idx
-    ON question_duplicates(canonical_id);
+CREATE INDEX IF NOT EXISTS printings_canonical_idx
+    ON question_printings(canonical_id);
 CREATE INDEX IF NOT EXISTS translations_status_idx ON translations(status);
 """
 
 VIEWS = """
 DROP VIEW IF EXISTS questions_clean;
-DROP VIEW IF EXISTS questions_canonical;
 DROP VIEW IF EXISTS questions_translated;
 
 -- Stage 2: everything that is a usable, self-contained question.
@@ -115,19 +157,12 @@ CREATE VIEW questions_clean AS
         SELECT 1 FROM question_exclusions AS x WHERE x.question_id = q.id
     );
 
--- Stage 3: one row per distinct question.
-CREATE VIEW questions_canonical AS
-    SELECT q.* FROM questions_clean AS q
-    WHERE NOT EXISTS (
-        SELECT 1 FROM question_duplicates AS d WHERE d.question_id = q.id
-    );
-
--- Stage 4: canonical questions that have usable English text.
+-- Stage 4: canonical questions that have usable English text. Every
+-- translation is current by construction, so the join needs only the id.
 CREATE VIEW questions_translated AS
     SELECT q.*, t.question_en, t.answer_en, t.explanation_en,
            t.acceptance_criteria_en, t.handout_text_en, t.status AS translation_status
     FROM questions_canonical AS q
-    JOIN translations AS t
-      ON t.question_id = q.id AND t.content_hash = q.content_hash
+    JOIN translations AS t ON t.question_id = q.id
     WHERE t.status IN ('translated', 'adapted');
 """

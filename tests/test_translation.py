@@ -5,7 +5,7 @@ import time
 from typing import Literal
 
 from shgk import db
-from shgk.curation import content_hash, normalized_hash
+from shgk.curation import content_hash, rebuild_canonical, rebuild_exclusions
 from shgk.translation import (
     CRITIC_MODEL,
     EDITOR_MODEL,
@@ -21,6 +21,7 @@ from shgk.translation import (
     UsageTotals,
     run_translation_workflow,
 )
+from shgk.translation.pipeline import prune_translations
 
 QUESTION = "Вопрос, достаточно длинный, чтобы пройти проверку на длину."
 
@@ -38,11 +39,12 @@ def _seed(tmp_path, count: int = 1, *, question: str = QUESTION):
             text = f"{question} {index}"
             connection.execute(
                 """INSERT INTO questions (id,package_id,question,answer,explanation,
-                     content_hash,normalized_hash)
-                   VALUES (?,1,?,'Ответ','Объяснение',?,?)""",
-                (index + 1, text, content_hash(text, "Ответ", "Объяснение", "", ""),
-                 normalized_hash(text)),
+                     content_hash)
+                   VALUES (?,1,?,'Ответ','Объяснение',?)""",
+                (index + 1, text, content_hash(text, "Ответ", "Объяснение", "", "")),
             )
+        rebuild_exclusions(connection)
+        rebuild_canonical(connection)
         connection.commit()
     return path
 
@@ -281,21 +283,41 @@ def test_pipeline_translates_pending_rows_and_resumes(tmp_path) -> None:
     assert third.selected == 0 and third.completed == 0
 
 
-def test_changed_question_text_makes_a_translation_stale(tmp_path) -> None:
-    path = _seed(tmp_path, 1)
-    asyncio.run(TranslationPipeline(path).run(FakeClient([_candidate()], [_critique()])))
-    assert _translated_ids(path) == [1]
+def test_changed_canonical_text_drops_the_translation(tmp_path) -> None:
+    """A translation lives exactly as long as the record it was made from."""
+    path = _seed(tmp_path, 2)
+    client = FakeClient([_candidate()] * 2, [_critique()] * 2)
+    asyncio.run(TranslationPipeline(path).run(client, limit=10))
+    assert _translated_ids(path) == [1, 2]
 
     with db.connect(path) as connection:
-        edited = QUESTION + " Изменённый текст вопроса."
+        # A reprint of question 1 arrives carrying an explanation the original
+        # lacked; the merged record, and so its content_hash, changes.
         connection.execute(
-            "UPDATE questions SET question = ?, content_hash = ? WHERE id = 1",
-            (edited, content_hash(edited, "Ответ", "Объяснение", "", "")),
+            "INSERT INTO questions (id,package_id,question,answer,explanation,"
+            "content_hash) VALUES (3,1,?,'Ответ','Куда более длинное объяснение.','h3')",
+            (QUESTION + " 0",),
         )
+        rebuild_exclusions(connection)
+        rebuild_canonical(connection)
+        assert prune_translations(connection) == 1
         connection.commit()
 
-    pipeline = TranslationPipeline(path)
-    assert pipeline._pending_inputs(limit=10, refresh=False)[0].question_id == 1
+    assert _translated_ids(path) == [2]
+    pending = TranslationPipeline(path)._pending_inputs(limit=10, refresh=False)
+    assert [item.question_id for item in pending] == [1]
+    assert pending[0].explanation == "Куда более длинное объяснение."
+
+
+def test_prune_leaves_unchanged_translations_alone(tmp_path) -> None:
+    path = _seed(tmp_path, 1)
+    asyncio.run(TranslationPipeline(path).run(FakeClient([_candidate()], [_critique()])))
+    with db.connect(path) as connection:
+        rebuild_exclusions(connection)
+        rebuild_canonical(connection)
+        assert prune_translations(connection) == 0
+        connection.commit()
+    assert _translated_ids(path) == [1]
 
 
 def test_refresh_retranslates_current_rows(tmp_path) -> None:
@@ -313,17 +335,15 @@ def test_excluded_and_duplicate_questions_are_never_translated(tmp_path) -> None
     path = _seed(tmp_path, 1)
     with db.connect(path) as connection:
         connection.execute(
-            "INSERT INTO questions (id,package_id,question,answer,content_hash,"
-            "normalized_hash) VALUES (2,1,'$1a','Ответ','h2','n2')"
+            "INSERT INTO questions (id,package_id,question,answer,content_hash) "
+            "VALUES (2,1,'$1a','Ответ','h2')"
         )
         connection.execute(
-            "INSERT INTO question_exclusions VALUES (2,'not_a_question')"
+            "INSERT INTO questions (id,package_id,question,answer,content_hash) "
+            "VALUES (3,1,?,'Ответ','h3')", (QUESTION + " 0",)
         )
-        connection.execute(
-            "INSERT INTO questions (id,package_id,question,answer,content_hash,"
-            "normalized_hash) VALUES (3,1,?,'Ответ','h3','n3')", (QUESTION + " 0",)
-        )
-        connection.execute("INSERT INTO question_duplicates VALUES (3,1)")
+        rebuild_exclusions(connection)
+        rebuild_canonical(connection)
         connection.commit()
 
     pending = TranslationPipeline(path)._pending_inputs(limit=10, refresh=False)

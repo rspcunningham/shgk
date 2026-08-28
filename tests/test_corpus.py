@@ -41,24 +41,23 @@ def test_build_counts_exclusions_and_duplicates(tmp_path) -> None:
     with db.connect(database) as connection:
         # One row that is not a question, and one reprint of an existing one.
         connection.execute(
-            "INSERT INTO questions (id,package_id,question,answer,content_hash,"
-            "normalized_hash) VALUES (900,1,'$1a','Ответ','h','n900')"
+            "INSERT INTO questions (id,package_id,question,answer,content_hash) "
+            "VALUES (900,1,'$1a','Ответ','h')"
         )
         original = connection.execute(
-            "SELECT question, normalized_hash FROM questions "
-            "WHERE id != 900 ORDER BY id LIMIT 1"
+            "SELECT question FROM questions WHERE id != 900 ORDER BY id LIMIT 1"
         ).fetchone()
         connection.execute(
-            "INSERT INTO questions (id,package_id,question,answer,content_hash,"
-            "normalized_hash) VALUES (901,1,?,'Ответ','h2',?)",
-            (original["question"], original["normalized_hash"]),
+            "INSERT INTO questions (id,package_id,question,answer,content_hash) "
+            "VALUES (901,1,?,'Ответ','h2')",
+            (original["question"],),
         )
         connection.commit()
 
     built = corpus.build(_site([1]), database=database, workers=1)
     assert built.exclusions == {"not_a_question": 1}
-    assert built.duplicate_groups == 1
-    assert built.duplicate_rows == 1
+    assert built.canonical["merged"] == 1
+    assert built.canonical["reprints"] == 1
     assert built.stats.clean == built.stats.questions - 1
     assert built.stats.canonical == built.stats.clean - 1
 

@@ -64,8 +64,29 @@ ON CONFLICT(question_id) DO UPDATE SET
     )}
 """
 
+def prune_translations(connection) -> int:
+    """Delete translations whose canonical record is gone or has changed.
+
+    Stage 3 rebuilds its records from scratch, and a record's content_hash
+    moves whenever a new printing adds text to translate. A translation that no
+    longer matches an existing record is not stale English worth keeping: it
+    is a row that describes nothing in the corpus. Removing it here is what
+    lets every other query treat "has a translation" as "has a current one".
+    """
+    return connection.execute(
+        """
+        DELETE FROM translations
+        WHERE NOT EXISTS (
+            SELECT 1 FROM questions_canonical AS q
+            WHERE q.id = translations.question_id
+              AND q.content_hash = translations.content_hash
+        )
+        """
+    ).rowcount
+
+
 class TranslationPipeline:
-    """Stage 4: translate canonical questions that have no current translation."""
+    """Stage 4: translate canonical questions that have no translation."""
 
     def __init__(self, database: str | Path = DEFAULT_DB_PATH):
         self.database = Path(database)
@@ -82,17 +103,12 @@ class TranslationPipeline:
         # untranslatable rate, quality -- describes the oldest packages rather
         # than the corpus.
         #
-        # A translation is current when it was produced from the question text
-        # that is in the database now; anything else is missing or stale.
+        # Stale translations are pruned at build time, so a question either
+        # has a current translation or none at all.
         freshness = (
             ""
             if refresh
-            else """
-            AND NOT EXISTS (
-                SELECT 1 FROM translations AS t
-                WHERE t.question_id = q.id AND t.content_hash = q.content_hash
-            )
-            """
+            else "AND NOT EXISTS (SELECT 1 FROM translations AS t WHERE t.question_id = q.id)"
         )
         with connect(self.database, read_only=True) as connection:
             rows = connection.execute(
@@ -215,10 +231,7 @@ class TranslationPipeline:
             pending = connection.execute(
                 """
                 SELECT COUNT(*) FROM questions_canonical AS q
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM translations AS t
-                    WHERE t.question_id = q.id AND t.content_hash = q.content_hash
-                )
+                WHERE NOT EXISTS (SELECT 1 FROM translations AS t WHERE t.question_id = q.id)
                 """
             ).fetchone()[0]
         return {"by_status": by_status, "pending": pending, **dict(totals)}

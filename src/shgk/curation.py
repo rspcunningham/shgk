@@ -1,7 +1,16 @@
 """Stages 2 and 3: decide which rows are usable questions, and which are reprints.
 
+Stage 3 does not pick a winner among reprints; it assembles one record from
+all of them. Each supplementary text field is taken from whichever printing has
+the longest version, and play statistics are pooled, so a question played at
+four tournaments is measured against all four fields and described by the
+fullest explanation anyone wrote for it.
+
 Both stages are pure functions of already-stored question text, cheap enough to
-rebuild from scratch over the whole corpus, so neither keeps incremental state.
+rebuild from scratch over the whole corpus, so neither keeps incremental state
+-- including the grouping hash, which is recomputed here rather than stored, so
+that changing how text is folded takes effect on the next build with nothing to
+migrate.
 """
 
 from __future__ import annotations
@@ -61,8 +70,16 @@ def detect_kind(question: str) -> str:
 
 
 def normalized_hash(question: str) -> str:
-    """Hash of the question with case, punctuation and spacing folded away."""
-    text = unicodedata.normalize("NFKC", question).casefold()
+    """Hash of the question with case, punctuation, spacing and yo folded away.
+
+    Deliberately conservative: it folds only differences that no reprint of a
+    question could meaningfully carry. Writing "e" for "yo" is a typographic
+    convention rather than a change to the text, and the source is inconsistent
+    about it, so the two spellings must hash alike. Anything looser -- stemming,
+    or reaching into the handout for questions whose text alone is generic --
+    starts merging questions that only look the same.
+    """
+    text = unicodedata.normalize("NFKC", question).casefold().replace("\u0451", "\u0435")
     text = _SPACE.sub(" ", _PUNCT.sub(" ", text)).strip()
     return sha256(text.encode("utf-8")).hexdigest()[:16]
 
@@ -113,61 +130,131 @@ def rebuild_exclusions(connection: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
-def _total_teams(solve_percentages: str, correct_answers: str) -> float:
-    """Teams that played, summed over every recorded playing.
+# Text fields where a later printing may carry more than the first one did.
+# The question itself is not among them: its variants differ only in the
+# folding that normalized_hash already ignores.
+MERGED_TEXT = ("answer", "explanation", "acceptance_criteria", "handout_text",
+               "source_references")
 
-    The source stores the correct-answer count and the percentage that solved
-    it, so the field size is their quotient.
+# Columns that stage 3 adds to a canonical record beyond those of ``questions``.
+POOLED = ("printings", "playings", "total_teams", "solve_rate")
+
+
+def _playings(row: dict) -> tuple[list, list]:
+    """The paired per-playing arrays, truncated to a common length.
+
+    The source ships them index-paired and equal-length. If that ever stops
+    being true, dropping the tail beats aborting a whole-corpus rebuild.
     """
-    try:
-        percentages = json.loads(solve_percentages)
-        corrects = json.loads(correct_answers)
-    except (TypeError, ValueError):
-        return 0.0
-    # The source ships these index-paired and equal-length. If that ever stops
-    # being true, dropping the tail beats aborting a whole-corpus rebuild.
-    return sum(
-        correct / (percentage / 100)
-        for percentage, correct in zip(percentages, corrects, strict=False)
-        if percentage
+    percentages = json.loads(row["solve_percentages"])
+    corrects = json.loads(row["correct_answers"])
+    common = min(len(percentages), len(corrects))
+    return percentages[:common], corrects[:common]
+
+
+def _teams(percentage: float, correct: int) -> float:
+    """Field size of one playing: the source records the count of teams that
+    solved a question and the percentage that did, so the field is the ratio."""
+    return correct / (percentage / 100) if percentage else 0.0
+
+
+def _union(lists: list[str]) -> str:
+    seen: dict = {}
+    for encoded in lists:
+        for item in json.loads(encoded):
+            seen.setdefault(json.dumps(item), item)
+    return json.dumps(list(seen.values()))
+
+
+def merge_printings(printings: list[dict]) -> dict:
+    """One canonical record from every clean printing of a question.
+
+    Identity and the question text come from the earliest printing. Each field
+    in MERGED_TEXT is the longest version any printing carries, which is the
+    same thing as the only version when there is one printing.
+    """
+    printings = sorted(printings, key=lambda row: row["id"])
+    record = dict(printings[0])
+    for column in MERGED_TEXT:
+        record[column] = max(
+            (row[column] for row in printings), key=lambda text: len(text.strip())
+        )
+    record["tournament_ids"] = _union([row["tournament_ids"] for row in printings])
+
+    percentages: list[float] = []
+    corrects: list[int] = []
+    for row in printings:
+        row_percentages, row_corrects = _playings(row)
+        percentages += row_percentages
+        corrects += row_corrects
+    total_teams = sum(map(_teams, percentages, corrects))
+    record.update(
+        solve_percentages=json.dumps(percentages),
+        correct_answers=json.dumps(corrects),
+        printings=len(printings),
+        playings=len(percentages),
+        total_teams=total_teams,
+        solve_rate=sum(corrects) / total_teams if total_teams else None,
+        content_hash=content_hash(
+            record["question"], record["answer"], record["explanation"],
+            record["acceptance_criteria"], record["handout_text"],
+        ),
     )
+    return record
 
 
-def rebuild_duplicates(connection: sqlite3.Connection) -> dict[str, int]:
+def rebuild_canonical(connection: sqlite3.Connection) -> dict[str, int]:
     """Recompute stage 3 from scratch.
 
-    Groups clean questions by normalized text and keeps the copy with the
-    largest measured field, since that row carries the most reliable difficulty
-    signal. Duplicates are recorded rather than deleted so their play statistics
-    remain available for merging once the label schema is settled.
+    Groups clean questions by normalized text and writes one merged record per
+    group. Rows are streamed: a question with a single printing is written as
+    soon as it is read, and only the members of multi-printing groups -- a few
+    percent of the corpus -- are held until the end.
     """
-    connection.execute("DELETE FROM question_duplicates")
-    groups: dict[str, list[tuple[int, float]]] = {}
-    for question_id, hash_value, percentages, corrects in connection.execute(
-        """
-        SELECT id, normalized_hash, solve_percentages, correct_answers
-        FROM questions_clean
-        """
-    ):
-        groups.setdefault(hash_value, []).append(
-            (question_id, _total_teams(percentages, corrects))
-        )
+    connection.execute("DELETE FROM question_printings")
+    connection.execute("DELETE FROM questions_canonical")
 
-    duplicates = []
-    for members in groups.values():
-        if len(members) < 2:
-            continue
-        canonical = max(members, key=lambda member: (member[1], -member[0]))[0]
-        duplicates.extend(
-            (question_id, canonical)
-            for question_id, _ in members
-            if question_id != canonical
-        )
+    members: dict[str, list[int]] = {}
+    for question_id, question in connection.execute(
+        "SELECT id, question FROM questions_clean"
+    ):
+        members.setdefault(normalized_hash(question), []).append(question_id)
+    group_of = {
+        question_id: hash_value
+        for hash_value, ids in members.items()
+        if len(ids) > 1
+        for question_id in ids
+    }
+
+    cursor = connection.execute("SELECT * FROM questions_clean")
+    columns = [description[0] for description in cursor.description]
+    canonical_columns = columns + list(POOLED)
+    insert = (
+        f"INSERT INTO questions_canonical ({', '.join(canonical_columns)}) "
+        f"VALUES ({', '.join(':' + column for column in canonical_columns)})"
+    )
+
+    pending: dict[str, list[dict]] = {}
+    records: list[dict] = []
+    for values in cursor:
+        row = dict(zip(columns, values, strict=True))
+        if row["id"] in group_of:
+            pending.setdefault(group_of[row["id"]], []).append(row)
+        else:
+            records.append(merge_printings([row]))
+    records.extend(merge_printings(group) for group in pending.values())
+
+    connection.executemany(insert, records)
     connection.executemany(
-        "INSERT INTO question_duplicates (question_id, canonical_id) VALUES (?, ?)",
-        duplicates,
+        "INSERT INTO question_printings (question_id, canonical_id) VALUES (?, ?)",
+        [
+            (question_id, min(ids))
+            for ids in members.values()
+            for question_id in ids
+        ],
     )
     return {
-        "groups": sum(1 for members in groups.values() if len(members) > 1),
-        "duplicates": len(duplicates),
+        "questions": len(records),
+        "merged": len(pending),
+        "reprints": len(group_of) - len(pending),
     }

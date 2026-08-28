@@ -81,7 +81,7 @@ def test_parses_embedded_pack() -> None:
     assert json.loads(question.media_urls) == [
         {"role": "handout", "url": "https://gotquestions.online/media/image.jpg"}
     ]
-    assert question.content_hash and question.normalized_hash
+    assert question.content_hash
 
 
 def test_declared_question_count_is_enforced() -> None:
