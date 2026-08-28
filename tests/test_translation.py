@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 
 from shgk import db
 from shgk.curation import content_hash, normalized_hash
@@ -21,7 +20,6 @@ from shgk.translation import (
     is_transient_error,
     run_translation_workflow,
 )
-
 
 QUESTION = "Вопрос, достаточно длинный, чтобы пройти проверку на длину."
 

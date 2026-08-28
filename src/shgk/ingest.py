@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Callable
 
 from .http import HttpClient
 from .sources.gotquestions import (

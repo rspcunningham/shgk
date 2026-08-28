@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from threading import Lock
 import time
+from threading import Lock
 
 import httpx
-
 
 USER_AGENT = "shgk-corpus/0.1 (private research corpus; respectful crawler)"
 

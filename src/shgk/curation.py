@@ -124,9 +124,11 @@ def _total_teams(solve_percentages: str, correct_answers: str) -> float:
         corrects = json.loads(correct_answers)
     except (TypeError, ValueError):
         return 0.0
+    # The source ships these index-paired and equal-length. If that ever stops
+    # being true, dropping the tail beats aborting a whole-corpus rebuild.
     return sum(
         correct / (percentage / 100)
-        for percentage, correct in zip(percentages, corrects)
+        for percentage, correct in zip(percentages, corrects, strict=False)
         if percentage
     )
 
