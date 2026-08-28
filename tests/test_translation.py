@@ -343,6 +343,42 @@ def test_selection_is_a_random_sample_not_the_lowest_ids(tmp_path) -> None:
     assert set(draws[0]) != {1, 2, 3, 4, 5}
 
 
+def test_translating_in_batches_covers_each_question_exactly_once(tmp_path) -> None:
+    """Random order must not cause a question to be redrawn or missed."""
+    path = _seed(tmp_path, 25)
+    pipeline = TranslationPipeline(path)
+    client = FakeClient([_candidate()] * 40, [_critique()] * 40)
+
+    drawn: list[int] = []
+    while True:
+        result = asyncio.run(pipeline.run(client, limit=4))
+        if not result.selected:
+            break
+        drawn.extend(result.translated_ids)
+
+    assert sorted(drawn) == list(range(1, 26))
+    assert len(drawn) == len(set(drawn)), "a question was translated twice"
+    assert _translated_ids(path) == list(range(1, 26))
+
+
+def test_a_draw_never_offers_the_same_question_twice(tmp_path) -> None:
+    path = _seed(tmp_path, 30)
+    ids = [
+        item.question_id
+        for item in TranslationPipeline(path)._pending_inputs(limit=30, refresh=False)
+    ]
+    assert len(ids) == len(set(ids)) == 30
+
+
+def test_refresh_offers_questions_that_are_already_current(tmp_path) -> None:
+    path = _seed(tmp_path, 5)
+    pipeline = TranslationPipeline(path)
+    asyncio.run(pipeline.run(FakeClient([_candidate()] * 5, [_critique()] * 5), limit=5))
+
+    assert pipeline._pending_inputs(limit=10, refresh=False) == []
+    assert len(pipeline._pending_inputs(limit=10, refresh=True)) == 5
+
+
 def test_every_selected_question_is_saved(tmp_path) -> None:
     path = _seed(tmp_path, 6)
     client = FakeClient([_candidate()] * 6, [_critique()] * 6)
