@@ -24,8 +24,6 @@ from .sources.gotquestions import (
     parse_pack,
 )
 
-SOURCE = "gotquestions"
-
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -135,6 +133,22 @@ def _store(connection: sqlite3.Connection, pack: ParsedPack, page_hash: str) -> 
     )
 
 
+def _mark_ok(connection: sqlite3.Connection, pack_id: int) -> None:
+    """Clear a failure without reparsing.
+
+    Only a package that was once stored successfully has a page_hash, so a
+    matching hash proves this exact page parsed before and the stored questions
+    are still good. Without this a package that failed once and then came back
+    unchanged would keep its failed status forever, and be refetched on every
+    run for the rest of time.
+    """
+    connection.execute(
+        "UPDATE packages SET status = 'ok', http_status = 200, error = '', "
+        "fetched_at = ? WHERE id = ?",
+        (_now(), pack_id),
+    )
+
+
 def _record_failure(
     connection: sqlite3.Connection, pack_id: int, status: str, error: str
 ) -> None:
@@ -203,9 +217,13 @@ def ingest(
                 _record_failure(connection, pack_id, "http_error", str(error))
                 continue
 
+            previous_status, previous_hash = known.get(pack_id, (None, None))
             page_hash = sha256(html.encode("utf-8")).hexdigest()[:16]
-            if not refresh and known.get(pack_id, (None, None))[1] == page_hash:
+            if not refresh and previous_hash == page_hash:
                 counts["unchanged"] += 1
+                if previous_status != "ok":
+                    _mark_ok(connection, pack_id)
+                    counts["recovered"] += 1
                 continue
 
             try:
@@ -221,7 +239,9 @@ def ingest(
                 continue
 
             _store(connection, pack, page_hash)
-            counts["new" if pack_id not in known else "updated"] += 1
+            # A package whose only previous record was a failure has never had
+            # its questions stored, so this is the first real ingest, not an update.
+            counts["updated" if previous_status == "ok" else "new"] += 1
             counts["questions"] += len(pack.questions)
             if progress and done % 200 == 0:
                 progress(f"  {done:,}/{len(targets):,} packages")

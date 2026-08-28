@@ -45,8 +45,8 @@ def main() -> int:
                 workers=args.workers, progress=print,
             )
         reported = False
-        for label in ("new", "updated", "unchanged", "skipped", "empty",
-                      "parse_error", "fetch_error", "questions"):
+        for label in ("new", "updated", "unchanged", "recovered", "skipped",
+                      "empty", "parse_error", "fetch_error", "questions"):
             if counts.get(label):
                 print(f"  {label:<28}{counts[label]:>10,}")
                 reported = True
