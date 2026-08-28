@@ -1,4 +1,4 @@
-"""Translate canonical questions that have no current translation.
+"""Translate a random sample of canonical questions that have no translation.
 
     python translate.py 100
 """
@@ -19,7 +19,6 @@ from shgk.translation.pricing import cost
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("count", type=int, help="how many questions to translate")
-    parser.add_argument("--offset", type=int, default=0)
     parser.add_argument(
         "--refresh", action="store_true", help="also redo translations already current"
     )
@@ -62,7 +61,6 @@ def main() -> int:
             TranslationPipeline().run(
                 AgentsTranslationClient(),
                 limit=args.count,
-                offset=args.offset,
                 refresh=args.refresh,
                 fail_fast=args.fail_fast,
                     progress=progress,

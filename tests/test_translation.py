@@ -270,10 +270,9 @@ def test_pipeline_translates_pending_rows_and_resumes(tmp_path) -> None:
 
     first = asyncio.run(pipeline.run(client, limit=2))
     assert first.selected == 2 and first.completed == 2
-    assert first.translated_ids == [1, 2]
-    assert _translated_ids(path) == [1, 2]
+    assert sorted(first.translated_ids) == _translated_ids(path)
 
-    # A rerun must not redo work that is already current.
+    # Whichever two were drawn, a rerun must pick up only the one left over.
     second = asyncio.run(pipeline.run(client, limit=2))
     assert second.selected == 1
     assert _translated_ids(path) == [1, 2, 3]
@@ -296,7 +295,7 @@ def test_changed_question_text_makes_a_translation_stale(tmp_path) -> None:
         connection.commit()
 
     pipeline = TranslationPipeline(path)
-    assert pipeline._pending_inputs(limit=10, offset=0, refresh=False)[0].question_id == 1
+    assert pipeline._pending_inputs(limit=10, refresh=False)[0].question_id == 1
 
 
 def test_refresh_retranslates_current_rows(tmp_path) -> None:
@@ -327,17 +326,21 @@ def test_excluded_and_duplicate_questions_are_never_translated(tmp_path) -> None
         connection.execute("INSERT INTO question_duplicates VALUES (3,1)")
         connection.commit()
 
-    pending = TranslationPipeline(path)._pending_inputs(limit=10, offset=0, refresh=False)
+    pending = TranslationPipeline(path)._pending_inputs(limit=10, refresh=False)
     assert [item.question_id for item in pending] == [1]
 
 
-def test_offset_creates_a_deterministic_slice(tmp_path) -> None:
-    path = _seed(tmp_path, 5)
+
+def test_selection_is_a_random_sample_not_the_lowest_ids(tmp_path) -> None:
+    """Ids follow packages, so taking them in order translates oldest-first."""
+    path = _seed(tmp_path, 40)
     pipeline = TranslationPipeline(path)
-    first = pipeline._pending_inputs(limit=2, offset=0, refresh=False)
-    second = pipeline._pending_inputs(limit=2, offset=2, refresh=False)
-    assert [item.question_id for item in first] == [1, 2]
-    assert [item.question_id for item in second] == [3, 4]
+    draws = [
+        tuple(item.question_id for item in pipeline._pending_inputs(limit=5, refresh=False))
+        for _ in range(8)
+    ]
+    assert len(set(draws)) > 1, "every draw returned the same questions"
+    assert set(draws[0]) != {1, 2, 3, 4, 5}
 
 
 def test_every_selected_question_is_saved(tmp_path) -> None:

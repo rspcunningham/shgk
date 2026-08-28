@@ -74,9 +74,14 @@ class TranslationPipeline:
         self,
         *,
         limit: int,
-        offset: int,
         refresh: bool,
     ) -> list[TranslationInput]:
+        # Sampled at random rather than taken in order. Question ids follow the
+        # packages they came in, so ordering by them translates the corpus
+        # oldest-first, and any measurement taken part-way through -- cost,
+        # untranslatable rate, quality -- describes the oldest packages rather
+        # than the corpus.
+        #
         # A translation is current when it was produced from the question text
         # that is in the database now; anything else is missing or stale.
         freshness = (
@@ -97,10 +102,10 @@ class TranslationPipeline:
                 FROM questions_canonical AS q
                 JOIN packages AS p ON p.id = q.package_id
                 WHERE 1 {freshness}
-                ORDER BY q.id
-                LIMIT ? OFFSET ?
+                ORDER BY RANDOM()
+                LIMIT ?
                 """,
-                (limit, offset),
+                (limit,),
             ).fetchall()
         return [
             TranslationInput(
@@ -143,14 +148,13 @@ class TranslationPipeline:
         client: TranslationClient,
         *,
         limit: int = 10,
-        offset: int = 0,
         max_revisions: int = 2,
         refresh: bool = False,
         fail_fast: bool = False,
         concurrency: int = MAX_IN_FLIGHT,
         progress: Reporter | None = None,
     ) -> RunResult:
-        inputs = self._pending_inputs(limit=limit, offset=offset, refresh=refresh)
+        inputs = self._pending_inputs(limit=limit, refresh=refresh)
         result = RunResult(selected=len(inputs))
         # Rate limits are handled where they surface, by backing off the call
         # that was refused. This only keeps a very large run from holding every
