@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
 import random
 import time
@@ -30,6 +31,11 @@ TRANSLATOR_MODEL = "gpt-5.6-luna"
 CRITIC_MODEL = "gpt-5.6-luna"
 EDITOR_MODEL = "gpt-5.6-luna"
 REASONING_EFFORT = "max"
+# A refused request usually carries the provider's own figure for when the limit
+# resets. That is better information than any schedule invented here, so it is
+# the primary source; backoff only covers failures that say nothing. The ceiling
+# on a server-directed delay matches the one the OpenAI SDK applies.
+MAX_RETRY_AFTER = 120.0
 BASE_BACKOFF = 5.0
 MAX_BACKOFF = 60.0
 
@@ -50,29 +56,51 @@ _TRANSIENT_API_ERRORS = (
 
 
 def retry_after_seconds(error: BaseException) -> float | None:
-    """The provider's own answer to when the limit resets, if it gave one."""
+    """The delay the provider asked for, in seconds, or None if it asked for none.
+
+    Read in the order the OpenAI SDK uses: `retry-after-ms` is non-standard but
+    more precise and is what a 429 usually carries, while `retry-after` may hold
+    either a count of seconds or an HTTP date.
+    """
     headers = getattr(getattr(error, "response", None), "headers", None)
-    if headers is None:
+    if headers is None or not hasattr(headers, "get"):
+        return None
+
+    try:
+        milliseconds = headers.get("retry-after-ms")
+        if milliseconds is not None:
+            return float(milliseconds) / 1000
+    except (TypeError, ValueError):
+        pass
+
+    value = headers.get("retry-after")
+    if value is None:
         return None
     try:
-        value = headers.get("retry-after")
-        return float(value) if value is not None else None
+        return float(value)
     except (TypeError, ValueError):
+        pass
+
+    parsed = email.utils.parsedate_tz(str(value))
+    if parsed is None:
+        return None
+    try:
+        return max(0.0, email.utils.mktime_tz(parsed) - time.time())
+    except (OverflowError, OSError, ValueError):
         return None
 
 
 def retry_delay(error: BaseException, attempt: int) -> float:
-    """How long to wait before retrying, with jitter.
+    """How long to wait before retrying.
 
-    Jitter is what lets concurrency be bounded by rate limits instead of by a
-    guess: without it every request rejected in the same instant retries in the
-    same instant, and a single rate-limit response comes back as a synchronised
-    wave of them.
+    Waiting exactly as long as the provider asked is the whole mechanism; the
+    growing delay is only for failures that carry no such figure, such as a
+    connection reset or a 5xx. Either way the wait is spread, so that requests
+    refused together do not all return together.
     """
     told = retry_after_seconds(error)
     if told is not None:
-        # Respect the server's figure, then spread the resumption slightly.
-        return told + random.uniform(0.0, 1.0)
+        return min(told, MAX_RETRY_AFTER) * random.uniform(1.0, 1.1)
     ceiling = min(MAX_BACKOFF, BASE_BACKOFF * 2**attempt)
     return ceiling / 2 + random.uniform(0.0, ceiling / 2)
 
