@@ -11,19 +11,17 @@ import asyncio
 
 from dotenv import load_dotenv
 
-from shgk import db
 from shgk.translation import (
     AgentsTranslationClient,
     TranslationPipeline,
     install_pooled_openai_client,
 )
+from shgk.translation.pipeline import RunResult
 
-# Rough planning figure only. Actual spend is dominated by reasoning tokens,
-# which vary several-fold between questions; the run reports real usage.
-COST_PER_QUESTION = 0.03
+POOLED_CLIENT_THRESHOLD = 8
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("count", type=int, help="how many questions to translate")
     parser.add_argument("--workers", type=int, default=8)
@@ -35,16 +33,37 @@ def main() -> int:
     args = parser.parse_args()
     if args.count < 1:
         parser.error("count must be at least 1")
+    return args
 
+
+def report(result: RunResult) -> None:
+    print(
+        f"selected={result.selected} completed={result.completed} "
+        f"errors={result.errors}"
+    )
+    if not result.completed:
+        return
+    usage = result.usage
+    print(
+        f"usage: {usage.requests:,} requests, "
+        f"input {usage.input_tokens:,} ({usage.cached_input_tokens:,} cached), "
+        f"output {usage.output_tokens:,} ({usage.reasoning_output_tokens:,} reasoning)"
+    )
+    print(
+        f"       per question: input {usage.input_tokens / result.completed:,.0f}, "
+        f"output {usage.output_tokens / result.completed:,.0f}"
+    )
+
+
+def main() -> int:
+    args = parse_args()
     load_dotenv(".env.local", override=False)
     load_dotenv(".env", override=False)
-    if args.workers > 8:
+    if args.workers > POOLED_CLIENT_THRESHOLD:
         install_pooled_openai_client()
 
-    print(f"translating up to {args.count:,} questions "
-          f"(rough estimate ${args.count * COST_PER_QUESTION:,.2f})")
     result = asyncio.run(
-        TranslationPipeline(db.DEFAULT_PATH).run(
+        TranslationPipeline().run(
             AgentsTranslationClient(),
             limit=args.count,
             offset=args.offset,
@@ -54,37 +73,8 @@ def main() -> int:
             progress=lambda message: print(message, flush=True),
         )
     )
-    print(
-        f"selected={result.selected} completed={result.completed} "
-        f"errors={result.errors}"
-    )
-    if result.completed:
-        _report_usage(result.translated_ids)
+    report(result)
     return 1 if result.errors else 0
-
-
-def _report_usage(question_ids: list[int]) -> None:
-    """Report what the run actually consumed, since estimates are unreliable here."""
-    if not question_ids:
-        return
-    placeholders = ",".join("?" * len(question_ids))
-    with db.connect(db.DEFAULT_PATH, read_only=True) as connection:
-        row = connection.execute(
-            f"""
-            SELECT SUM(input_tokens) i, SUM(cached_input_tokens) c,
-                   SUM(output_tokens) o, SUM(reasoning_output_tokens) r,
-                   SUM(api_requests) q, COUNT(*) n
-            FROM translations WHERE question_id IN ({placeholders})
-            """,
-            question_ids,
-        ).fetchone()
-    n = row["n"] or 1
-    print(
-        f"usage: {row['q']:,} requests, "
-        f"input {row['i']:,} ({row['c']:,} cached), "
-        f"output {row['o']:,} ({row['r']:,} reasoning)"
-    )
-    print(f"       per question: input {row['i'] / n:,.0f}, output {row['o'] / n:,.0f}")
 
 
 if __name__ == "__main__":

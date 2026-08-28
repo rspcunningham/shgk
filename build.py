@@ -1,4 +1,4 @@
-"""Build the corpus: fetch new packages, then rebuild the curated stages.
+"""Fetch new packages and rebuild the curated stages.
 
     python build.py
 """
@@ -7,72 +7,69 @@ from __future__ import annotations
 
 import argparse
 
-from shgk import db
-from shgk.curation import rebuild_duplicates, rebuild_exclusions
+from shgk import corpus
 from shgk.http import HttpClient
-from shgk.ingest import ingest
-
-DATABASE = db.DEFAULT_PATH
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pages", type=int, help="index pages to crawl (default: all)")
     parser.add_argument(
-        "--refresh", action="store_true",
+        "--refresh",
+        action="store_true",
         help="re-parse every package, even ones whose page is unchanged",
     )
-    parser.add_argument("--workers", type=int, default=8,
-                        help="packages fetched concurrently")
-    parser.add_argument("--delay", type=float, default=0.0,
-                        help="minimum seconds between request starts")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--workers", type=int, default=8, help="packages fetched concurrently"
+    )
+    parser.add_argument(
+        "--delay", type=float, default=0.0, help="minimum seconds between requests"
+    )
+    return parser.parse_args()
 
-    db.initialize(DATABASE)
-    with db.connect(DATABASE) as connection:
-        print("stage 1: packages")
-        with HttpClient(delay=args.delay) as client:
-            counts = ingest(
-                connection, client,
-                pages=args.pages, refresh=args.refresh,
-                workers=args.workers, progress=print,
-            )
-        reported = False
-        for label in ("new", "updated", "unchanged", "recovered", "skipped",
-                      "empty", "parse_error", "fetch_error", "questions"):
-            if counts.get(label):
-                print(f"  {label:<28}{counts[label]:>10,}")
-                reported = True
-        if not reported:
-            print(f"  {'already up to date':<28}")
 
-        print("stage 2: exclusions")
-        for reason, count in sorted(
-            rebuild_exclusions(connection).items(), key=lambda item: -item[1]
-        ):
-            print(f"  {reason:<28}{count:>10,}")
+def row(label: str, value: int | str) -> None:
+    formatted = f"{value:,}" if isinstance(value, int) else value
+    print(f"  {label:<28}{formatted:>10}")
 
-        print("stage 3: duplicates")
-        stats = rebuild_duplicates(connection)
-        print(f"  {'duplicate groups':<28}{stats['groups']:>10,}")
-        print(f"  {'non-canonical rows':<28}{stats['duplicates']:>10,}")
-        connection.commit()
 
-        print("stages")
-        for view in ("questions", "questions_clean", "questions_canonical",
-                     "questions_translated"):
-            count = connection.execute(f"SELECT COUNT(*) FROM {view}").fetchone()[0]
-            print(f"  {view:<28}{count:>10,}")
-        pending = connection.execute(
-            """
-            SELECT COUNT(*) FROM questions_canonical AS q
-            WHERE NOT EXISTS (
-                SELECT 1 FROM translations AS t
-                WHERE t.question_id = q.id AND t.content_hash = q.content_hash
-            )
-            """
-        ).fetchone()[0]
-        print(f"  {'awaiting translation':<28}{pending:>10,}")
+FETCH_LABELS = (
+    "new", "updated", "unchanged", "recovered", "skipped",
+    "empty", "parse_error", "fetch_error", "questions",
+)
+
+
+def report(built: corpus.BuildReport) -> None:
+    print("stage 1: packages")
+    counted = [(name, built.fetched[name]) for name in FETCH_LABELS
+               if built.fetched[name]]
+    for label, value in counted or [("already up to date", "")]:
+        row(label, value)
+
+    print("stage 2: exclusions")
+    for reason, count in sorted(built.exclusions.items(), key=lambda item: -item[1]):
+        row(reason, count)
+
+    print("stage 3: duplicates")
+    row("duplicate groups", built.duplicate_groups)
+    row("non-canonical rows", built.duplicate_rows)
+
+    print("corpus")
+    row("questions", built.stats.questions)
+    row("clean", built.stats.clean)
+    row("canonical", built.stats.canonical)
+    row("translated", built.stats.translated)
+    row("awaiting translation", built.stats.awaiting_translation)
+
+
+def main() -> int:
+    args = parse_args()
+    with HttpClient(delay=args.delay) as client:
+        built = corpus.build(
+            client, pages=args.pages, refresh=args.refresh, workers=args.workers,
+            progress=print,
+        )
+    report(built)
     return 0
 
 

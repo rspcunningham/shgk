@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..db import DEFAULT_PATH as DEFAULT_DB_PATH
 from ..db import connect
-from .models import TranslationClient, TranslationInput
+from .models import TranslationClient, TranslationInput, UsageTotals
 from .workflow import WorkflowResult, run_translation_workflow
 
 
@@ -22,6 +22,8 @@ class RunResult:
     completed: int = 0
     errors: int = 0
     translated_ids: list[int] = field(default_factory=list)
+    # Summed as the run goes, so reporting spend needs no second query.
+    usage: UsageTotals = field(default_factory=UsageTotals)
 
 
 # One list, used to build the statement and to order the values, so the two can
@@ -172,6 +174,7 @@ class TranslationPipeline:
                     return
                 self._save(source, workflow)
                 result.translated_ids.append(source.question_id)
+                result.usage.add(workflow.usage)
                 result.completed += 1
                 finished += 1
                 if progress:
