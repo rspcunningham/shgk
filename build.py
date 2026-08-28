@@ -6,15 +6,11 @@
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
-
-from shgk import db  # noqa: E402
-from shgk.curation import rebuild_duplicates, rebuild_exclusions  # noqa: E402
-from shgk.http import HttpClient  # noqa: E402
-from shgk.ingest import ingest  # noqa: E402
+from shgk import db
+from shgk.curation import rebuild_duplicates, rebuild_exclusions
+from shgk.http import HttpClient
+from shgk.ingest import ingest
 
 DATABASE = db.DEFAULT_PATH
 

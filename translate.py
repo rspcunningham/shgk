@@ -8,15 +8,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from dotenv import load_dotenv
 
-from dotenv import load_dotenv  # noqa: E402
-
-from shgk import db  # noqa: E402
-from shgk.translation import (  # noqa: E402
+from shgk import db
+from shgk.translation import (
     AgentsTranslationClient,
     TranslationPipeline,
     install_pooled_openai_client,

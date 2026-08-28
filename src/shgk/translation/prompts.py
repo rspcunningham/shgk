@@ -82,8 +82,9 @@ Judge the candidate rather than rubber-stamping it. Apply these gates in order:
 Request revision only for a material defect affecting correctness, fairness, or
 player-facing English. Unnatural translationese that a competent English editor
 would immediately rewrite is material; a preference between two equally natural
-phrasings is not. Do not cycle through synonyms. Do not request revision solely to change `translated`
-versus `adapted`; accept and set accepted_status to the right category. Accept an
+phrasings is not. Do not cycle through synonyms. Do not request revision
+solely to change `translated` versus `adapted`; accept and set
+accepted_status to the right category. Accept an
 untranslatable result only when its reason is specific and no permitted local
 repair is plausible. Keep a consistent feasibility judgment across revisions.
 On every response, accepted_status is also your feasibility judgment: set it to

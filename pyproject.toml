@@ -41,11 +41,3 @@ line-length = 100
 # F catches undefined names, which is how a missing import gets through when the
 # tests exercise a stand-in rather than the real object.
 select = ["E", "F", "I", "UP", "B"]
-
-[tool.ruff.lint.per-file-ignores]
-# The entrypoints put src on sys.path before importing from it.
-"build.py" = ["E402"]
-"translate.py" = ["E402"]
-# Agent instructions are prose that has been tuned against measured output.
-# Rewrapping a line would change the prompt, so line length does not apply.
-"src/shgk/translation/prompts.py" = ["E501"]
