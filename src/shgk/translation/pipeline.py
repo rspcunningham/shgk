@@ -10,6 +10,7 @@ from pathlib import Path
 from ..db import DEFAULT_PATH as DEFAULT_DB_PATH
 from ..db import connect
 from ..progress import Reporter
+from .client import MAX_IN_FLIGHT
 from .models import TranslationClient, TranslationInput, UsageTotals
 from .workflow import WorkflowResult, run_translation_workflow
 
@@ -146,11 +147,14 @@ class TranslationPipeline:
         max_revisions: int = 2,
         refresh: bool = False,
         fail_fast: bool = False,
-        concurrency: int = 1,
+        concurrency: int = MAX_IN_FLIGHT,
         progress: Reporter | None = None,
     ) -> RunResult:
         inputs = self._pending_inputs(limit=limit, offset=offset, refresh=refresh)
         result = RunResult(selected=len(inputs))
+        # Rate limits are handled where they surface, by backing off the call
+        # that was refused. This only keeps a very large run from holding every
+        # question, and its prompts, in memory at once.
         semaphore = asyncio.Semaphore(max(1, concurrency))
         finished = 0
 

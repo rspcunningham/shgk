@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from typing import Literal
 
 from shgk import db
@@ -21,6 +22,11 @@ from shgk.translation import (
     UsageTotals,
     is_transient_error,
     run_translation_workflow,
+)
+from shgk.translation.client import (
+    MAX_BACKOFF,
+    retry_after_seconds,
+    retry_delay,
 )
 
 QUESTION = "Вопрос, достаточно длинный, чтобы пройти проверку на длину."
@@ -434,3 +440,37 @@ def test_saving_does_not_stall_the_event_loop(tmp_path) -> None:
     # Three calls deep, all twenty overlapping: anything beyond a small margin
     # over one round means saving is blocking the loop.
     assert elapsed < latency * 3 * 2
+
+
+class RateLimited(Exception):
+    """A 429 carrying the header the provider actually sends."""
+
+    def __init__(self, retry_after: str | None = None):
+        super().__init__("Error code: 429")
+        headers = {} if retry_after is None else {"retry-after": retry_after}
+        self.response = SimpleNamespace(headers=headers)
+
+
+def test_retry_after_is_honoured_when_the_provider_sends_one() -> None:
+    delay = retry_delay(RateLimited("12"), attempt=0)
+    assert 12.0 <= delay <= 13.0
+
+
+def test_backoff_grows_and_is_capped() -> None:
+    plain = Exception("Error code: 500")
+    assert retry_delay(plain, 0) < retry_delay(plain, 3)
+    assert all(retry_delay(plain, attempt) <= MAX_BACKOFF for attempt in range(10))
+
+
+def test_backoff_is_jittered() -> None:
+    """Without spread, everything refused at once retries at once."""
+    plain = Exception("Error code: 429")
+    delays = {retry_delay(plain, 3) for _ in range(20)}
+    assert len(delays) > 1
+
+
+def test_a_missing_or_unparseable_retry_after_falls_back_to_backoff() -> None:
+    assert retry_after_seconds(RateLimited(None)) is None
+    assert retry_after_seconds(RateLimited("not-a-number")) is None
+    assert retry_after_seconds(Exception("no response at all")) is None
+    assert retry_delay(RateLimited("not-a-number"), 0) > 0

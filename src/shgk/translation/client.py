@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
 
-import httpx
-from agents import Agent, ModelSettings, RunConfig, Runner, set_default_openai_client
+from agents import Agent, ModelSettings, RunConfig, Runner
 from openai import (
     APIConnectionError,
     APITimeoutError,
-    AsyncOpenAI,
-    DefaultAsyncHttpxClient,
     InternalServerError,
     RateLimitError,
 )
@@ -32,6 +30,14 @@ TRANSLATOR_MODEL = "gpt-5.6-luna"
 CRITIC_MODEL = "gpt-5.6-luna"
 EDITOR_MODEL = "gpt-5.6-luna"
 REASONING_EFFORT = "max"
+BASE_BACKOFF = 5.0
+MAX_BACKOFF = 60.0
+
+# Each question in flight holds at most one connection, and the SDK's pool
+# allows a thousand; past that requests queue inside httpx regardless. So this
+# is not a tuning knob, it is where the transport stops helping.
+MAX_IN_FLIGHT = 1000
+
 TRANSLATION_WORKFLOW_VERSION = 13
 
 _TRANSIENT_API_ERRORS = (
@@ -41,6 +47,34 @@ _TRANSIENT_API_ERRORS = (
     InternalServerError,
     TimeoutError,
 )
+
+
+def retry_after_seconds(error: BaseException) -> float | None:
+    """The provider's own answer to when the limit resets, if it gave one."""
+    headers = getattr(getattr(error, "response", None), "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get("retry-after")
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def retry_delay(error: BaseException, attempt: int) -> float:
+    """How long to wait before retrying, with jitter.
+
+    Jitter is what lets concurrency be bounded by rate limits instead of by a
+    guess: without it every request rejected in the same instant retries in the
+    same instant, and a single rate-limit response comes back as a synchronised
+    wave of them.
+    """
+    told = retry_after_seconds(error)
+    if told is not None:
+        # Respect the server's figure, then spread the resumption slightly.
+        return told + random.uniform(0.0, 1.0)
+    ceiling = min(MAX_BACKOFF, BASE_BACKOFF * 2**attempt)
+    return ceiling / 2 + random.uniform(0.0, ceiling / 2)
 
 
 def is_transient_error(error: BaseException | str) -> bool:
@@ -182,7 +216,7 @@ class AgentsTranslationClient:
             except Exception as error:
                 if not is_transient_error(error) or retry >= self.transient_retries:
                     raise
-                await asyncio.sleep(min(60.0, 5.0 * (2**retry)))
+                await asyncio.sleep(retry_delay(error, retry))
         if result is None:
             raise AssertionError("unreachable")
         output = result.final_output_as(output_type, raise_if_incorrect_type=True)
@@ -248,30 +282,3 @@ class AgentsTranslationClient:
         )
 
 
-_POOLED_CLIENT_INSTALLED = False
-
-
-def install_pooled_openai_client(max_connections: int = 2048) -> None:
-    """Widen the shared OpenAI connection pool for high-concurrency runs.
-
-    The SDK's default pool caps at 1000 connections, which silently becomes the
-    throughput ceiling long before the account's rate limits do. Token usage is
-    what actually binds here (~25k tokens/question against 10M tokens/min), so
-    the pool must not be the limiting factor.
-    """
-
-    global _POOLED_CLIENT_INSTALLED
-    if _POOLED_CLIENT_INSTALLED:
-        return
-    set_default_openai_client(
-        AsyncOpenAI(
-            http_client=DefaultAsyncHttpxClient(
-                limits=httpx.Limits(
-                    max_connections=max_connections,
-                    max_keepalive_connections=max_connections // 2,
-                ),
-                timeout=httpx.Timeout(600.0, connect=15.0),
-            )
-        )
-    )
-    _POOLED_CLIENT_INSTALLED = True

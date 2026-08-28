@@ -11,7 +11,6 @@ from .client import (
     TRANSLATION_WORKFLOW_VERSION,
     TRANSLATOR_MODEL,
     AgentsTranslationClient,
-    install_pooled_openai_client,
     is_transient_error,
 )
 from .models import (
@@ -45,7 +44,6 @@ __all__ = [
     "TranslationPipeline",
     "UsageTotals",
     "WorkflowResult",
-    "install_pooled_openai_client",
     "is_transient_error",
     "run_translation_workflow",
 ]
