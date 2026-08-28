@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import email.utils
 import time
-from types import SimpleNamespace
 from typing import Literal
 
 from shgk import db
@@ -21,14 +19,7 @@ from shgk.translation import (
     TranslationInput,
     TranslationPipeline,
     UsageTotals,
-    is_transient_error,
     run_translation_workflow,
-)
-from shgk.translation.client import (
-    MAX_BACKOFF,
-    MAX_RETRY_AFTER,
-    retry_after_seconds,
-    retry_delay,
 )
 
 QUESTION = "Вопрос, достаточно длинный, чтобы пройти проверку на длину."
@@ -174,18 +165,6 @@ def _input() -> TranslationInput:
         package_title="Пакет",
     )
 
-
-def test_nvidia_overload_payload_is_transient() -> None:
-    assert is_transient_error(
-        "ChatCompletion response has no choices (possible provider error payload): "
-        "{'message': 'Upstream error from Nvidia: Service temporarily overloaded', "
-        "'code': 502}"
-    )
-    assert is_transient_error(
-        "APIStatusError: Error code: 402 - This request requires more credits"
-    )
-    assert not is_transient_error("ValueError: model did not return a JSON object")
-    assert not is_transient_error("ValidationError: 1 validation error for TranslationCandidate")
 
 
 def test_workflow_passes_critic_feedback_to_one_revision() -> None:
@@ -369,8 +348,9 @@ def test_every_selected_question_is_saved(tmp_path) -> None:
     assert _translated_ids(path) == [1, 2, 3, 4, 5, 6]
 
 
-def test_client_constructs_its_three_agents() -> None:
+def test_client_constructs_its_three_agents(monkeypatch) -> None:
     """The unit tests all use a fake client, so nothing else builds the real one."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-used-for-any-request")
     client = AgentsTranslationClient()
     assert client.translator.model == TRANSLATOR_MODEL
     assert client.critic.model == CRITIC_MODEL
@@ -444,57 +424,3 @@ def test_saving_does_not_stall_the_event_loop(tmp_path) -> None:
     assert elapsed < latency * 3 * 2
 
 
-class RateLimited(Exception):
-    """A 429 carrying whichever headers the provider chose to send."""
-
-    def __init__(self, **headers: str):
-        super().__init__("Error code: 429")
-        self.response = SimpleNamespace(headers=headers)
-
-
-def test_the_millisecond_header_wins_because_it_is_what_a_429_carries() -> None:
-    error = RateLimited(**{"retry-after-ms": "250", "retry-after": "99"})
-    assert retry_after_seconds(error) == 0.25
-
-
-def test_retry_after_is_read_as_seconds_or_as_a_date() -> None:
-    assert retry_after_seconds(RateLimited(**{"retry-after": "12"})) == 12.0
-    when = email.utils.formatdate(time.time() + 30)
-    seconds = retry_after_seconds(RateLimited(**{"retry-after": when}))
-    assert seconds is not None and 25 <= seconds <= 31
-
-
-def test_waiting_as_long_as_asked_is_the_primary_path() -> None:
-    delay = retry_delay(RateLimited(**{"retry-after": "12"}), attempt=0)
-    assert 12.0 <= delay <= 13.2
-
-
-def test_the_attempt_number_does_not_change_a_directed_wait() -> None:
-    """The provider's figure is not something to escalate past."""
-    error = RateLimited(**{"retry-after": "10"})
-    for attempt in range(5):
-        assert 10.0 <= retry_delay(error, attempt) <= 11.0
-
-
-def test_an_absurd_directed_wait_is_capped() -> None:
-    delay = retry_delay(RateLimited(**{"retry-after": "86400"}), attempt=0)
-    assert delay <= MAX_RETRY_AFTER * 1.1
-
-
-def test_backoff_covers_failures_that_say_nothing() -> None:
-    silent = Exception("Error code: 500")
-    assert retry_delay(silent, 0) < retry_delay(silent, 3)
-    assert all(retry_delay(silent, attempt) <= MAX_BACKOFF for attempt in range(10))
-
-
-def test_every_wait_is_spread() -> None:
-    """Requests refused together must not all return together."""
-    for error in (Exception("Error code: 429"), RateLimited(**{"retry-after": "30"})):
-        assert len({retry_delay(error, 3) for _ in range(20)}) > 1
-
-
-def test_headers_that_say_nothing_usable_fall_back_to_backoff() -> None:
-    assert retry_after_seconds(RateLimited()) is None
-    assert retry_after_seconds(RateLimited(**{"retry-after": "soon"})) is None
-    assert retry_after_seconds(Exception("no response at all")) is None
-    assert retry_delay(RateLimited(**{"retry-after": "soon"}), 0) > 0

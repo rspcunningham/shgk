@@ -11,7 +11,6 @@ from .client import (
     TRANSLATION_WORKFLOW_VERSION,
     TRANSLATOR_MODEL,
     AgentsTranslationClient,
-    is_transient_error,
 )
 from .models import (
     AgentCall,
@@ -44,6 +43,5 @@ __all__ = [
     "TranslationPipeline",
     "UsageTotals",
     "WorkflowResult",
-    "is_transient_error",
     "run_translation_workflow",
 ]

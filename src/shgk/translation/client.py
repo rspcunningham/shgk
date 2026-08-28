@@ -1,20 +1,11 @@
-"""The three SDK agents, and what counts as a retryable failure."""
+"""The three SDK agents that translate, critique and copy-edit."""
 
 from __future__ import annotations
 
-import asyncio
-import email.utils
 import json
-import random
-import time
 
-from agents import Agent, ModelSettings, RunConfig, Runner
-from openai import (
-    APIConnectionError,
-    APITimeoutError,
-    InternalServerError,
-    RateLimitError,
-)
+from agents import Agent, ModelSettings, RunConfig, Runner, set_default_openai_client
+from openai import AsyncOpenAI
 
 from .models import (
     AgentCall,
@@ -31,117 +22,28 @@ TRANSLATOR_MODEL = "gpt-5.6-luna"
 CRITIC_MODEL = "gpt-5.6-luna"
 EDITOR_MODEL = "gpt-5.6-luna"
 REASONING_EFFORT = "max"
-# A refused request usually carries the provider's own figure for when the limit
-# resets. That is better information than any schedule invented here, so it is
-# the primary source; backoff only covers failures that say nothing. The ceiling
-# on a server-directed delay matches the one the OpenAI SDK applies.
-MAX_RETRY_AFTER = 120.0
-BASE_BACKOFF = 5.0
-MAX_BACKOFF = 60.0
-
 # Each question in flight holds at most one connection, and the SDK's pool
 # allows a thousand; past that requests queue inside httpx regardless. So this
 # is not a tuning knob, it is where the transport stops helping.
 MAX_IN_FLIGHT = 1000
 
+# The SDK retries on its own: it honours Retry-After and x-should-retry, covers
+# 408, 409, 429, 5xx, connection errors and timeouts, and jitters. All this
+# raises is how many attempts it gets, since two is thin for a run measured in
+# hours against a rate limit.
+MAX_RETRIES = 8
+
+
 TRANSLATION_WORKFLOW_VERSION = 13
 
-_TRANSIENT_API_ERRORS = (
-    RateLimitError,
-    APIConnectionError,
-    APITimeoutError,
-    InternalServerError,
-    TimeoutError,
-)
+
+def _configure_retries() -> None:
+    """Give the shared client a retry budget suited to a long batch run."""
+    set_default_openai_client(AsyncOpenAI(max_retries=MAX_RETRIES))
 
 
-def retry_after_seconds(error: BaseException) -> float | None:
-    """The delay the provider asked for, in seconds, or None if it asked for none.
-
-    Read in the order the OpenAI SDK uses: `retry-after-ms` is non-standard but
-    more precise and is what a 429 usually carries, while `retry-after` may hold
-    either a count of seconds or an HTTP date.
-    """
-    headers = getattr(getattr(error, "response", None), "headers", None)
-    if headers is None or not hasattr(headers, "get"):
-        return None
-
-    try:
-        milliseconds = headers.get("retry-after-ms")
-        if milliseconds is not None:
-            return float(milliseconds) / 1000
-    except (TypeError, ValueError):
-        pass
-
-    value = headers.get("retry-after")
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        pass
-
-    parsed = email.utils.parsedate_tz(str(value))
-    if parsed is None:
-        return None
-    try:
-        return max(0.0, email.utils.mktime_tz(parsed) - time.time())
-    except (OverflowError, OSError, ValueError):
-        return None
-
-
-def retry_delay(error: BaseException, attempt: int) -> float:
-    """How long to wait before retrying.
-
-    Waiting exactly as long as the provider asked is the whole mechanism; the
-    growing delay is only for failures that carry no such figure, such as a
-    connection reset or a 5xx. Either way the wait is spread, so that requests
-    refused together do not all return together.
-    """
-    told = retry_after_seconds(error)
-    if told is not None:
-        return min(told, MAX_RETRY_AFTER) * random.uniform(1.0, 1.1)
-    ceiling = min(MAX_BACKOFF, BASE_BACKOFF * 2**attempt)
-    return ceiling / 2 + random.uniform(0.0, ceiling / 2)
-
-
-def is_transient_error(error: BaseException | str) -> bool:
-    if isinstance(error, _TRANSIENT_API_ERRORS):
-        return True
-    text = str(error)
-    return any(
-        marker in text
-        for marker in (
-            "RateLimitError:",
-            "APIConnectionError:",
-            "APITimeoutError:",
-            "InternalServerError:",
-            "Error code: 408",
-            "Error code: 429",
-            "Error code: 500",
-            "Error code: 502",
-            "Error code: 503",
-            "Error code: 504",
-            "'code': 429",
-            "'code': 500",
-            "'code': 502",
-            "'code': 503",
-            "'code': 504",
-            "Error code: 402",
-            "'code': 402",
-            "requires more credits",
-            "Upstream idle timeout exceeded",
-            "temporarily overloaded",
-            "Service temporarily overloaded",
-            # Anthropic 529 shape: {"type": "overloaded_error", ...}
-            "overloaded_error",
-            "'message': 'Overloaded'",
-            "Error code: 529",
-            "no choices (possible provider error payload)",
-        )
-    )
-
-
+# Reasoning tokens count against max_tokens, so a higher effort needs headroom
+# or the model runs out of budget before emitting its structured output.
 _MAX_TOKENS_BY_EFFORT = {
     "none": 2500,
     "low": 4000,
@@ -155,20 +57,12 @@ _MAX_TOKENS_BY_EFFORT = {
 class AgentsTranslationClient:
     """Three independent SDK agents with application-owned orchestration."""
 
-    def __init__(
-        self,
-        *,
-        min_request_interval: float = 0.0,
-        transient_retries: int = 6,
-    ):
+    def __init__(self) -> None:
+        _configure_retries()
         self.translator_model = TRANSLATOR_MODEL
         self.critic_model = CRITIC_MODEL
         self.editor_model = EDITOR_MODEL
         self.reasoning_effort = REASONING_EFFORT
-        self.min_request_interval = min_request_interval
-        self.transient_retries = transient_retries
-        self._last_request_at = 0.0
-        self._request_lock = asyncio.Lock()
 
         # The Agents SDK stamps a fresh prompt_cache_key on every run, which
         # routes each request to a different cache partition: the shared
@@ -223,30 +117,9 @@ class AgentsTranslationClient:
         prompt: str,
         output_type: type[TranslationCandidate | TranslationCritique | EnglishEdit],
     ) -> AgentCall:
-        result = None
-        for retry in range(self.transient_retries + 1):
-            if self.min_request_interval > 0:
-                async with self._request_lock:
-                    delay = self.min_request_interval - (
-                        time.monotonic() - self._last_request_at
-                    )
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                    self._last_request_at = time.monotonic()
-            try:
-                result = await Runner.run(
-                    agent,
-                    prompt,
-                    max_turns=1,
-                    run_config=self.run_config,
-                )
-                break
-            except Exception as error:
-                if not is_transient_error(error) or retry >= self.transient_retries:
-                    raise
-                await asyncio.sleep(retry_delay(error, retry))
-        if result is None:
-            raise AssertionError("unreachable")
+        result = await Runner.run(
+            agent, prompt, max_turns=1, run_config=self.run_config
+        )
         output = result.final_output_as(output_type, raise_if_incorrect_type=True)
         usage = result.context_wrapper.usage
         return AgentCall(
