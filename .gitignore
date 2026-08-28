@@ -6,7 +6,5 @@ __pycache__/
 .env
 .env.local
 data/
-benchmark/
-benchmarks/results/
 runs/
 *.egg-info/
