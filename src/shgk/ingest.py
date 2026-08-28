@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
-from .http import HttpClient
+from .http import Fetcher
 from .sources.gotquestions import (
     BASE_URL,
     PACK_URL,
@@ -45,7 +45,7 @@ RESTLESS_DAYS = 180
 
 
 def discover(
-    client: HttpClient,
+    client: Fetcher,
     *,
     settled: frozenset[int] = frozenset(),
     pages: int | None = None,
@@ -168,7 +168,7 @@ def _record_failure(
 
 def ingest(
     connection: sqlite3.Connection,
-    client: HttpClient,
+    client: Fetcher,
     *,
     pack_ids: list[int] | None = None,
     pages: int | None = None,
@@ -212,7 +212,7 @@ def ingest(
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         for pack_id, html, error in pool.map(fetch, targets):
             done += 1
-            if error is not None:
+            if html is None:
                 counts["fetch_error"] += 1
                 _record_failure(connection, pack_id, "http_error", str(error))
                 continue

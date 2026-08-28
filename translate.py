@@ -1,8 +1,5 @@
 """Translate canonical questions that have no current translation.
 
-This is the stage that costs money -- roughly $0.03 a question -- so the number
-of questions is required rather than defaulted.
-
     python translate.py 100
     python translate.py 100 --workers 16
 """
@@ -62,12 +59,12 @@ def main() -> int:
         )
     )
     print(
-        f"selected={result['selected']} completed={result['completed']} "
-        f"errors={result['errors']}"
+        f"selected={result.selected} completed={result.completed} "
+        f"errors={result.errors}"
     )
-    if result["completed"]:
-        _report_usage(result["question_ids"])
-    return 1 if result["errors"] else 0
+    if result.completed:
+        _report_usage(result.translated_ids)
+    return 1 if result.errors else 0
 
 
 def _report_usage(question_ids: list[int]) -> None:

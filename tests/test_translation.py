@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 
 from shgk import db
 from shgk.curation import content_hash, normalized_hash
@@ -53,7 +54,9 @@ def _translated_ids(path) -> list[int]:
 
 
 def _candidate(
-    *, status: str = "translated", question: str = "Question"
+    *,
+    status: Literal["translated", "adapted", "untranslatable"] = "translated",
+    question: str = "Question",
 ) -> TranslationCandidate:
     return TranslationCandidate(
         status=status,
@@ -68,7 +71,9 @@ def _candidate(
 
 
 def _critique(
-    *, decision: str = "accept", status: str = "translated"
+    *,
+    decision: Literal["accept", "revise"] = "accept",
+    status: Literal["translated", "adapted", "untranslatable"] = "translated",
 ) -> TranslationCritique:
     return TranslationCritique(
         decision=decision,
@@ -81,7 +86,7 @@ def _critique(
 
 def _edit(
     *,
-    decision: str = "unchanged",
+    decision: Literal["unchanged", "edited", "needs_rework"] = "unchanged",
     question: str = "Question",
     reason: str = "",
 ) -> EnglishEdit:
@@ -187,7 +192,9 @@ def test_workflow_passes_critic_feedback_to_one_revision() -> None:
     assert result.critic_attempts == 2
     assert result.usage == UsageTotals(requests=5, input_tokens=420, output_tokens=130)
     assert client.feedback_seen[0] is None
-    assert client.feedback_seen[1].revision_instructions == "Fix the word count."
+    feedback = client.feedback_seen[1]
+    assert feedback is not None
+    assert feedback.revision_instructions == "Fix the word count."
 
 
 def test_workflow_becomes_untranslatable_when_revision_limit_is_exhausted() -> None:
@@ -274,17 +281,17 @@ def test_pipeline_translates_pending_rows_and_resumes(tmp_path) -> None:
     pipeline = TranslationPipeline(path)
 
     first = asyncio.run(pipeline.run(client, limit=2))
-    assert first["selected"] == 2 and first["completed"] == 2
-    assert first["question_ids"] == [1, 2]
+    assert first.selected == 2 and first.completed == 2
+    assert first.translated_ids == [1, 2]
     assert _translated_ids(path) == [1, 2]
 
     # A rerun must not redo work that is already current.
     second = asyncio.run(pipeline.run(client, limit=2))
-    assert second["selected"] == 1
+    assert second.selected == 1
     assert _translated_ids(path) == [1, 2, 3]
 
     third = asyncio.run(pipeline.run(client, limit=2))
-    assert third["selected"] == 0 and third["completed"] == 0
+    assert third.selected == 0 and third.completed == 0
 
 
 def test_changed_question_text_makes_a_translation_stale(tmp_path) -> None:
@@ -310,8 +317,8 @@ def test_refresh_retranslates_current_rows(tmp_path) -> None:
     pipeline = TranslationPipeline(path)
     asyncio.run(pipeline.run(client, limit=10))
 
-    assert asyncio.run(pipeline.run(client, limit=10))["selected"] == 0
-    assert asyncio.run(pipeline.run(client, limit=10, refresh=True))["selected"] == 2
+    assert asyncio.run(pipeline.run(client, limit=10)).selected == 0
+    assert asyncio.run(pipeline.run(client, limit=10, refresh=True)).selected == 2
 
 
 def test_excluded_and_duplicate_questions_are_never_translated(tmp_path) -> None:
@@ -349,7 +356,7 @@ def test_workers_translate_concurrently_and_save_every_row(tmp_path) -> None:
     path = _seed(tmp_path, 6)
     client = FakeClient([_candidate()] * 6, [_critique()] * 6)
     result = asyncio.run(TranslationPipeline(path).run(client, limit=6, workers=4))
-    assert result["selected"] == 6 and result["completed"] == 6 and result["errors"] == 0
+    assert result.selected == 6 and result.completed == 6 and result.errors == 0
     assert _translated_ids(path) == [1, 2, 3, 4, 5, 6]
 
 
@@ -361,5 +368,5 @@ def test_client_constructs_its_three_agents() -> None:
     assert client.editor.model == EDITOR_MODEL
     assert client.reasoning_effort == REASONING_EFFORT
     for agent in (client.translator, client.critic, client.editor):
-        assert agent.model_settings.max_tokens > 0
+        assert (agent.model_settings.max_tokens or 0) > 0
         assert agent.output_type is not None

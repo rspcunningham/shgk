@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,6 +12,17 @@ from ..db import DEFAULT_PATH as DEFAULT_DB_PATH
 from ..db import connect
 from .models import TranslationClient, TranslationInput
 from .workflow import WorkflowResult, run_translation_workflow
+
+
+@dataclass(slots=True)
+class RunResult:
+    """What a translation run selected and what became of it."""
+
+    selected: int = 0
+    completed: int = 0
+    errors: int = 0
+    translated_ids: list[int] = field(default_factory=list)
+
 
 # One list, used to build the statement and to order the values, so the two can
 # never drift apart.
@@ -134,11 +146,9 @@ class TranslationPipeline:
         fail_fast: bool = False,
         workers: int = 1,
         progress: Callable[[str], None] | None = None,
-    ) -> dict[str, int]:
+    ) -> RunResult:
         inputs = self._pending_inputs(limit=limit, offset=offset, refresh=refresh)
-        counts: dict[str, object] = {
-            "selected": len(inputs), "completed": 0, "errors": 0, "question_ids": [],
-        }
+        result = RunResult(selected=len(inputs))
         semaphore = asyncio.Semaphore(max(1, workers))
         finished = 0
 
@@ -146,11 +156,11 @@ class TranslationPipeline:
             nonlocal finished
             async with semaphore:
                 try:
-                    result = await run_translation_workflow(
+                    workflow = await run_translation_workflow(
                         client, source, max_revisions=max_revisions
                     )
                 except Exception as error:
-                    counts["errors"] += 1
+                    result.errors += 1
                     finished += 1
                     if progress:
                         progress(
@@ -160,21 +170,21 @@ class TranslationPipeline:
                     if fail_fast:
                         raise
                     return
-                self._save(source, result)
-                counts["question_ids"].append(source.question_id)
-                counts["completed"] += 1
+                self._save(source, workflow)
+                result.translated_ids.append(source.question_id)
+                result.completed += 1
                 finished += 1
                 if progress:
                     progress(
                         f"[{finished}/{len(inputs)}] {source.question_id}: "
-                        f"{result.candidate.status} "
-                        f"({result.translation_attempts} attempt(s))"
+                        f"{workflow.candidate.status} "
+                        f"({workflow.translation_attempts} attempt(s))"
                     )
 
         async with asyncio.TaskGroup() as group:
             for source in inputs:
                 group.create_task(translate_one(source))
-        return counts
+        return result
 
     def stats(self) -> dict[str, object]:
         with connect(self.database, read_only=True) as connection:

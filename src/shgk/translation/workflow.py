@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .models import (
     ENGLISH_FIELDS,
@@ -24,7 +24,7 @@ class WorkflowResult:
     critic_attempts: int
     editor_attempts: int
     usage: UsageTotals
-    history: list[dict[str, object]]
+    history: list[dict[str, Any]]
     pre_editor_candidate: TranslationCandidate | None
     editor_result: EnglishEdit | None
     editor_usage: UsageTotals
@@ -65,7 +65,7 @@ async def _finalize_with_editor(
     translation_attempts: int,
     critic_attempts: int,
     usage: UsageTotals,
-    history: list[dict[str, object]],
+    history: list[dict[str, Any]],
 ) -> WorkflowResult:
     if candidate.status == "untranslatable":
         return WorkflowResult(
@@ -146,7 +146,7 @@ async def run_translation_workflow(
     max_revisions: int = 2,
 ) -> WorkflowResult:
     usage = UsageTotals()
-    history: list[dict[str, object]] = []
+    history: list[dict[str, Any]] = []
     previous: TranslationCandidate | None = None
     feedback: TranslationCritique | None = None
     last_playable: TranslationCandidate | None = None

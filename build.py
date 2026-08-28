@@ -1,8 +1,5 @@
 """Build the corpus: fetch new packages, then rebuild the curated stages.
 
-Free, deterministic and idempotent -- safe to run at any time. Translation is
-deliberately not here; see translate.py.
-
     python build.py
 """
 

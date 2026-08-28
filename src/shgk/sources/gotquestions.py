@@ -90,7 +90,7 @@ def discover_pack_ids(html: str) -> list[int]:
     result: list[int] = []
     seen: set[int] = set()
     for anchor in soup.find_all("a", href=True):
-        match = _PACK_LINK_RE.match(anchor["href"])
+        match = _PACK_LINK_RE.match(str(anchor["href"]))
         if match and int(match.group(1)) not in seen:
             seen.add(int(match.group(1)))
             result.append(int(match.group(1)))

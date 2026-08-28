@@ -2,8 +2,23 @@ from __future__ import annotations
 
 import time
 from threading import Lock
+from typing import Protocol
 
 import httpx
+
+
+class Page(Protocol):
+    # A read-only property, not a plain attribute: httpx.Response.text is a
+    # property, and a writable protocol member would exclude it.
+    @property
+    def text(self) -> str: ...
+
+
+class Fetcher(Protocol):
+    """All that ingestion needs from a client: fetch a URL, hand back the text."""
+
+    def get(self, url: str) -> Page: ...
+
 
 USER_AGENT = "shgk-corpus/0.1 (private research corpus; respectful crawler)"
 
