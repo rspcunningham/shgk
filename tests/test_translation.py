@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Literal
 
 from shgk import db
@@ -352,10 +353,10 @@ def test_offset_creates_a_deterministic_slice(tmp_path) -> None:
     assert [item.question_id for item in second] == [3, 4]
 
 
-def test_workers_translate_concurrently_and_save_every_row(tmp_path) -> None:
+def test_every_selected_question_is_saved(tmp_path) -> None:
     path = _seed(tmp_path, 6)
     client = FakeClient([_candidate()] * 6, [_critique()] * 6)
-    result = asyncio.run(TranslationPipeline(path).run(client, limit=6, workers=4))
+    result = asyncio.run(TranslationPipeline(path).run(client, limit=6, concurrency=4))
     assert result.selected == 6 and result.completed == 6 and result.errors == 0
     assert _translated_ids(path) == [1, 2, 3, 4, 5, 6]
 
@@ -370,3 +371,66 @@ def test_client_constructs_its_three_agents() -> None:
     for agent in (client.translator, client.critic, client.editor):
         assert (agent.model_settings.max_tokens or 0) > 0
         assert agent.output_type is not None
+
+
+class SlowClient:
+    """A client that takes measurable time and records how much overlapped."""
+
+    translator_model = critic_model = editor_model = "fake"
+    reasoning_effort = "low"
+
+    def __init__(self, latency: float = 0.05):
+        self.latency = latency
+        self.in_flight = 0
+        self.peak_in_flight = 0
+
+    async def _call(self, output) -> AgentCall:
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        await asyncio.sleep(self.latency)
+        self.in_flight -= 1
+        return AgentCall(output, UsageTotals(1, 10, 5))
+
+    async def propose(self, source, *, previous=None, feedback=None) -> AgentCall:
+        return await self._call(_candidate())
+
+    async def critique(self, source, candidate) -> AgentCall:
+        return await self._call(_critique())
+
+    async def edit(self, source, candidate) -> AgentCall:
+        return await self._call(_edit())
+
+
+def test_concurrency_bounds_requests_in_flight(tmp_path) -> None:
+    """Translation runs on one event loop, so the limit is the only throttle."""
+    path = _seed(tmp_path, 12)
+    client = SlowClient()
+    asyncio.run(TranslationPipeline(path).run(client, limit=12, concurrency=4))
+    assert client.peak_in_flight == 4
+
+
+def test_raising_concurrency_overlaps_more_work(tmp_path) -> None:
+    path = _seed(tmp_path, 12)
+    client = SlowClient()
+    asyncio.run(TranslationPipeline(path).run(client, limit=12, concurrency=12))
+    assert client.peak_in_flight == 12
+
+
+def test_concurrency_of_one_serialises(tmp_path) -> None:
+    path = _seed(tmp_path, 4)
+    client = SlowClient()
+    asyncio.run(TranslationPipeline(path).run(client, limit=4, concurrency=1))
+    assert client.peak_in_flight == 1
+
+
+def test_saving_does_not_stall_the_event_loop(tmp_path) -> None:
+    """The write is synchronous SQLite; it must stay far below call latency."""
+    path = _seed(tmp_path, 20)
+    latency = 0.05
+    client = SlowClient(latency=latency)
+    started = time.perf_counter()
+    asyncio.run(TranslationPipeline(path).run(client, limit=20, concurrency=20))
+    elapsed = time.perf_counter() - started
+    # Three calls deep, all twenty overlapping: anything beyond a small margin
+    # over one round means saving is blocking the loop.
+    assert elapsed < latency * 3 * 2

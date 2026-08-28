@@ -146,12 +146,12 @@ class TranslationPipeline:
         max_revisions: int = 2,
         refresh: bool = False,
         fail_fast: bool = False,
-        workers: int = 1,
+        concurrency: int = 1,
         progress: Reporter | None = None,
     ) -> RunResult:
         inputs = self._pending_inputs(limit=limit, offset=offset, refresh=refresh)
         result = RunResult(selected=len(inputs))
-        semaphore = asyncio.Semaphore(max(1, workers))
+        semaphore = asyncio.Semaphore(max(1, concurrency))
         finished = 0
 
         async def translate_one(source: TranslationInput) -> None:

@@ -19,13 +19,22 @@ from shgk.translation import (
 )
 from shgk.translation.pipeline import RunResult
 
-POOLED_CLIENT_THRESHOLD = 8
+# Questions are translated on one event loop, so this bounds in-flight requests
+# rather than any pool of workers. Each in-flight question holds at most one
+# connection, and the SDK's pool allows 1000, so only go wider than that.
+DEFAULT_CONCURRENCY = 32
+SDK_CONNECTION_LIMIT = 1000
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("count", type=int, help="how many questions to translate")
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help=f"questions in flight at once (default: {DEFAULT_CONCURRENCY})",
+    )
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument(
         "--refresh", action="store_true", help="also redo translations already current"
@@ -34,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.count < 1:
         parser.error("count must be at least 1")
+    if args.concurrency < 1:
+        parser.error("concurrency must be at least 1")
     return args
 
 
@@ -60,8 +71,8 @@ def main() -> int:
     args = parse_args()
     load_dotenv(".env.local", override=False)
     load_dotenv(".env", override=False)
-    if args.workers > POOLED_CLIENT_THRESHOLD:
-        install_pooled_openai_client()
+    if args.concurrency >= SDK_CONNECTION_LIMIT:
+        install_pooled_openai_client(max_connections=args.concurrency * 2)
 
     with Progress("questions") as progress:
         result = asyncio.run(
@@ -71,7 +82,7 @@ def main() -> int:
                 offset=args.offset,
                 refresh=args.refresh,
                 fail_fast=args.fail_fast,
-                workers=args.workers,
+                concurrency=args.concurrency,
                 progress=progress,
             )
         )
