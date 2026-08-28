@@ -11,6 +11,7 @@ import asyncio
 
 from dotenv import load_dotenv
 
+from shgk.progress import Progress
 from shgk.translation import (
     AgentsTranslationClient,
     TranslationPipeline,
@@ -62,17 +63,18 @@ def main() -> int:
     if args.workers > POOLED_CLIENT_THRESHOLD:
         install_pooled_openai_client()
 
-    result = asyncio.run(
-        TranslationPipeline().run(
-            AgentsTranslationClient(),
-            limit=args.count,
-            offset=args.offset,
-            refresh=args.refresh,
-            fail_fast=args.fail_fast,
-            workers=args.workers,
-            progress=lambda message: print(message, flush=True),
+    with Progress("questions") as progress:
+        result = asyncio.run(
+            TranslationPipeline().run(
+                AgentsTranslationClient(),
+                limit=args.count,
+                offset=args.offset,
+                refresh=args.refresh,
+                fail_fast=args.fail_fast,
+                workers=args.workers,
+                progress=progress,
+            )
         )
-    )
     report(result)
     return 1 if result.errors else 0
 

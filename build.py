@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from shgk import corpus
 from shgk.http import HttpClient
+from shgk.ingest import IndexUnavailable
+from shgk.progress import Progress
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,11 +67,15 @@ def report(built: corpus.BuildReport) -> None:
 
 def main() -> int:
     args = parse_args()
-    with HttpClient(delay=args.delay) as client:
-        built = corpus.build(
-            client, pages=args.pages, refresh=args.refresh, workers=args.workers,
-            progress=print,
-        )
+    try:
+        with HttpClient(delay=args.delay) as client, Progress("packages") as progress:
+            built = corpus.build(
+                client, pages=args.pages, refresh=args.refresh,
+                workers=args.workers, progress=progress,
+            )
+    except IndexUnavailable as error:
+        print(f"build: {error}", file=sys.stderr)
+        return 1
     report(built)
     return 0
 

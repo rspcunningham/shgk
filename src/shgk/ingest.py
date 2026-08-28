@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 from .http import Fetcher
+from .progress import Reporter
 from .sources.gotquestions import (
     BASE_URL,
     PACK_URL,
@@ -44,6 +44,16 @@ SETTLED = ("ok", "empty")
 RESTLESS_DAYS = 180
 
 
+class IndexUnavailable(RuntimeError):
+    """The package index returned no packages.
+
+    Raised rather than reported as "nothing new", because the two are
+    indistinguishable from the outside and only one of them is fine. The site
+    serves a maintenance stub with no package links, and treating that as an
+    up-to-date corpus hides an outage for as long as it lasts.
+    """
+
+
 def discover(
     client: Fetcher,
     *,
@@ -64,6 +74,11 @@ def discover(
     while pages is None or page <= pages:
         ids = discover_pack_ids(client.get(_index_url(page)).text)
         if not ids:
+            if page == 1:
+                raise IndexUnavailable(
+                    f"{_index_url(page)} listed no packages; the site may be "
+                    "down for maintenance"
+                )
             break
         fresh = [pack_id for pack_id in ids if pack_id not in seen]
         seen.update(fresh)
@@ -174,7 +189,7 @@ def ingest(
     pages: int | None = None,
     refresh: bool = False,
     workers: int = 8,
-    progress: Callable[[str], None] | None = None,
+    progress: Reporter | None = None,
 ) -> Counter[str]:
     """Fetch and store packages.
 
@@ -215,6 +230,8 @@ def ingest(
             if html is None:
                 counts["fetch_error"] += 1
                 _record_failure(connection, pack_id, "http_error", str(error))
+                if progress:
+                    progress(done, len(targets), "fetch failed")
                 continue
 
             previous_status, previous_hash = known.get(pack_id, (None, None))
@@ -224,6 +241,8 @@ def ingest(
                 if previous_status != "ok":
                     _mark_ok(connection, pack_id)
                     counts["recovered"] += 1
+                if progress:
+                    progress(done, len(targets))
                 continue
 
             try:
@@ -243,7 +262,7 @@ def ingest(
             # its questions stored, so this is the first real ingest, not an update.
             counts["updated" if previous_status == "ok" else "new"] += 1
             counts["questions"] += len(pack.questions)
-            if progress and done % 200 == 0:
-                progress(f"  {done:,}/{len(targets):,} packages")
+            if progress:
+                progress(done, len(targets))
     connection.commit()
     return counts

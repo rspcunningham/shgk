@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 from ..db import DEFAULT_PATH as DEFAULT_DB_PATH
 from ..db import connect
+from ..progress import Reporter
 from .models import TranslationClient, TranslationInput, UsageTotals
 from .workflow import WorkflowResult, run_translation_workflow
 
@@ -147,7 +147,7 @@ class TranslationPipeline:
         refresh: bool = False,
         fail_fast: bool = False,
         workers: int = 1,
-        progress: Callable[[str], None] | None = None,
+        progress: Reporter | None = None,
     ) -> RunResult:
         inputs = self._pending_inputs(limit=limit, offset=offset, refresh=refresh)
         result = RunResult(selected=len(inputs))
@@ -165,10 +165,7 @@ class TranslationPipeline:
                     result.errors += 1
                     finished += 1
                     if progress:
-                        progress(
-                            f"[{finished}/{len(inputs)}] {source.question_id}: "
-                            f"ERROR: {error}"
-                        )
+                        progress(finished, len(inputs), f"error: {error}")
                     if fail_fast:
                         raise
                     return
@@ -178,11 +175,7 @@ class TranslationPipeline:
                 result.completed += 1
                 finished += 1
                 if progress:
-                    progress(
-                        f"[{finished}/{len(inputs)}] {source.question_id}: "
-                        f"{workflow.candidate.status} "
-                        f"({workflow.translation_attempts} attempt(s))"
-                    )
+                    progress(finished, len(inputs), workflow.candidate.status)
 
         async with asyncio.TaskGroup() as group:
             for source in inputs:

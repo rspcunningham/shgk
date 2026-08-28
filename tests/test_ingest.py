@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from shgk import db
-from shgk.ingest import RESTLESS_DAYS, discover, ingest
+from shgk.ingest import RESTLESS_DAYS, IndexUnavailable, discover, ingest
 from shgk.sources.gotquestions import BASE_URL, PACK_URL
 
 QUESTION = "Назовите предмет, который используется для чая в поезде."
@@ -231,3 +231,18 @@ def test_a_package_that_failed_then_returns_unchanged_recovers(database) -> None
     counts = _counts(database, _site([1], played_at=RECENT))
     assert counts["unchanged"] == 1 and counts["recovered"] == 1
     assert _statuses(database) == {1: "ok"}
+
+
+def test_an_index_with_no_packages_is_an_error_not_an_empty_result() -> None:
+    """A maintenance stub and a corpus with nothing new look identical otherwise."""
+    http = FakeHttp({BASE_URL: "<html><body>Технические работы</body></html>"})
+    with pytest.raises(IndexUnavailable):
+        discover(http)
+
+
+def test_a_later_empty_page_just_ends_the_crawl() -> None:
+    http = FakeHttp({
+        BASE_URL: _index_html([2, 1]),
+        f"{BASE_URL}/?page=2": _index_html([]),
+    })
+    assert discover(http) == [2, 1]

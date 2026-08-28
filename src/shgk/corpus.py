@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from . import db
 from .curation import rebuild_duplicates, rebuild_exclusions
 from .http import Fetcher
 from .ingest import ingest
+from .progress import Reporter
 
 PENDING_TRANSLATION = """
 SELECT COUNT(*) FROM questions_canonical AS q
@@ -67,7 +67,7 @@ def build(
     pages: int | None = None,
     refresh: bool = False,
     workers: int = 8,
-    progress: Callable[[str], None] | None = None,
+    progress: Reporter | None = None,
 ) -> BuildReport:
     db.initialize(database)
     with db.connect(database) as connection:
